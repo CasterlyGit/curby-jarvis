@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-05-31
+
+### Added
+
+- **On-device voice input** (`stt.py`): a continuous `VoiceListener` built on the macOS Speech framework (`SFSpeechRecognizer`, on-device) fed by an `AVAudioEngine` microphone tap — no API key, no network, no model download. Phrases are segmented by partial-transcription-stability endpointing (`should_endpoint`) with a hard run-on cap, then handed to the router. Optional wake word via `CURBY_WAKE`.
+- **Full `--live` controller**: brings up the Qt overlays, drives the crosshair reticle from the live gesture pointer at 30 fps, listens on-device, lowers each phrase, binds deixis to the fused pointer, and executes the cheapest confident connector — all with the audio/UI path on the Qt main thread and routing/execution on worker threads so input always snaps.
+- **Confirm gate, wired**: `_overlay_confirm` now shows the frosted card and blocks the dispatch worker on a real Confirm/Cancel (marshaled to the Qt main thread), serialized so two phrases can't race one card, and defaulting to Cancel on a 30 s timeout — an irreversible action never fires without an explicit human Confirm.
+- **`--check` preflight**: probes and requests Microphone + Speech Recognition, reports Accessibility trust, the `claude` agent floor, and gesture-websocket reachability, and opens the relevant Privacy & Security pane for anything missing.
+- Accessory activation policy for the overlay app (no Dock icon / focus theft) via `macwin.set_accessory_policy`.
+
+### Fixed
+
+- `macwin.make_always_visible` no longer dereferences a non-backed `winId()` under the `offscreen`/`minimal` Qt platforms (CI), which could segfault the headless suite; it now no-ops cleanly when there is no window server.
+
+### Tests
+
+- 272 passing (1 skipped), fully headless — adds STT endpointing/normalization units and the live dispatch/confirm/reticle wiring driven with fakes.
+
+[1.0.0]: https://github.com/CasterlyGit/curby-jarvis/releases/tag/v1.0.0
+
 ## [0.1.0] - 2026-05-31
 
 ### Added

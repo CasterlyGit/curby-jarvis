@@ -23,7 +23,8 @@ is exactly what the golden harness drives.
     --say "<utterance>"   one-shot through the full pipeline
     --dry-run             resolve + PREVIEW only (no execute); prints one JSON line
     --pointer X,Y         inject a fake bound deixis point (headless deixis demos)
-    --live                hotkey + STT loop (degrades to a no-op if no mic/STT)
+    --live                full controller: voice in + gesture reticle + confirm
+    --check               preflight: probe + request mic/Speech/AX, report status
 """
 from __future__ import annotations
 
@@ -82,6 +83,11 @@ class CurbyJarvis:
         self._app = None             # QApplication — lazy
         self._reticle = None         # ReticleWidget — lazy
         self._card = None            # PreviewCardWidget — lazy
+        self._voice = None           # stt.VoiceListener — lazy (live mode only)
+        self._ret_timer = None       # QTimer driving the reticle — lazy
+        import threading
+        self._confirm_lock = threading.Lock()  # one confirm card prompts at a time
+        self._confirm_timeout_s = 30.0          # auto-Cancel a gated action if ignored
 
     # -- router assembly ------------------------------------------------------
 
@@ -274,15 +280,18 @@ class CurbyJarvis:
             "target_rect": target_rect,
         }
 
-    # -- live mode (lazy Qt; degrades without mic/STT) ------------------------
+    # -- live mode (lazy Qt; voice in + gesture reticle + confirm gate) -------
 
     def run_live(self) -> int:
-        """Bring up the Qt app + overlays + gesture stream + a hotkey/STT loop.
+        """Bring up the full controller: Qt overlays, gesture stream → reticle,
+        on-device voice → route → confirm → execute.
 
-        This is the only path that touches Qt and the camera, all lazily. If no STT
-        backend or mic is available it degrades to a no-op event loop (the overlays
-        still work; voice input simply never fires) rather than crashing — a missing
-        mic must not take down the controller.
+        This is the only path that touches Qt and the microphone, all lazily. The
+        microphone listener is best-effort: if Speech access is denied or the
+        framework is absent, the overlays + gesture reticle still run and the user
+        can grant access and relaunch — a missing mic must not take down the
+        controller. Each finished phrase is routed and executed on a worker thread
+        so the audio/UI path always stays responsive.
         """
         from .prewarm import prewarm
         prewarm()  # warm the Anthropic TLS socket so the first LLM parse is snappy
@@ -294,25 +303,42 @@ class CurbyJarvis:
             return 2
 
         self._app = QApplication.instance() or QApplication(sys.argv[:1])
+        # macOS: an accessory app shows overlays without stealing focus / a Dock icon.
+        try:
+            from .macwin import set_accessory_policy
+            set_accessory_policy()
+        except Exception:
+            pass
+
         self._ensure_overlay()
         self._pointer_stream().start()
+        self._start_reticle_driver()
+        self._start_stt()
 
-        # STT is best-effort: if no backend, we still spin the event loop so the
-        # overlays and gesture reticle are live and a future STT can attach.
-        self._start_stt_best_effort()
-
+        print("[curby-jarvis] live. Overlays up; routing voice → connectors. "
+              "Ctrl-C to quit.", file=sys.stderr)
         try:
             return int(self._app.exec())
         finally:
+            try:
+                if self._voice is not None:
+                    self._voice.stop()
+            except Exception:
+                pass
             try:
                 self._pointer_stream().stop()
             except Exception:
                 pass
 
     def _ensure_overlay(self):
-        """Lazily build the _Bridge + reticle + card widgets on the Qt main thread."""
+        """Lazily build the _Bridge + reticle + card widgets on the Qt main thread,
+        and wire the cross-thread `invoke` marshal so worker threads can run a
+        callable on the Qt main thread (overlay shows, card confirm)."""
         if self._bridge is None:
             self._bridge = _make_bridge()
+            # Queued (cross-thread) delivery: emitting `invoke` from any worker
+            # thread runs the carried callable on the Qt main thread.
+            self._bridge.invoke.connect(lambda fn: fn())
         if self._reticle is None:
             from .overlay.reticle import ReticleWidget
             self._reticle = ReticleWidget()
@@ -320,27 +346,118 @@ class CurbyJarvis:
             from .overlay.preview_card import PreviewCardWidget
             self._card = PreviewCardWidget()
 
-    def _start_stt_best_effort(self) -> None:
-        """Attach an STT loop if a backend exists; otherwise no-op (mic-free demo).
+    def _run_on_main(self, fn) -> None:
+        """Marshal a zero-arg callable onto the Qt main thread via the _Bridge."""
+        self._bridge.invoke.emit(fn)
 
-        Kept intentionally thin for v0.1: curby owns the full dictation stack. Here
-        we only need a hook; absent one, live mode is still a working overlay demo.
-        """
-        return None
+    # -- gesture → reticle ----------------------------------------------------
+
+    def _start_reticle_driver(self) -> None:
+        """Poll the pointer stream at ~30fps and drive the crosshair reticle.
+
+        The reticle follows the freshest aimed/confident fingertip sample mapped
+        to logical screen pixels; it hides when no qualifying sample is present
+        (no hand, low confidence, or the hand-signal daemon is down)."""
+        from PyQt6.QtCore import QTimer
+
+        self._ret_timer = QTimer()
+        self._ret_timer.timeout.connect(self._poll_pointer)
+        self._ret_timer.start(33)
+
+    def _poll_pointer(self) -> None:
+        try:
+            sample = self._pointer_stream().latest()
+        except Exception:
+            sample = None
+        if sample is None:
+            if self._reticle is not None and self._reticle.isVisible():
+                self._reticle.hide()
+            return
+        try:
+            x, y = self._calib().map(sample.x_norm, sample.y_norm)
+            self._reticle.show_reticle(x, y)
+        except Exception:
+            pass
+
+    # -- voice → route → confirm → execute ------------------------------------
+
+    def _start_stt(self) -> None:
+        """Start the on-device voice listener; route each finished phrase."""
+        try:
+            from .stt import VoiceListener
+        except Exception as e:
+            print(f"[curby-jarvis] STT module unavailable: {e}", file=sys.stderr)
+            return
+        import os
+        # Optional wake word. Defaults to "hey curby" so ambient speech isn't
+        # routed; override/disable via CURBY_WAKE (set CURBY_WAKE="" to turn off).
+        wake = os.environ.get("CURBY_WAKE", "hey curby") or None
+        self._voice = VoiceListener(
+            self._on_voice_utterance,
+            wake_word=wake,
+            on_status=lambda m: print(f"[curby-jarvis] {m}", file=sys.stderr),
+        )
+        if not self._voice.start():
+            print("[curby-jarvis] voice input off (grant Microphone + Speech "
+                  "Recognition, then relaunch). Gesture + overlays still live.",
+                  file=sys.stderr)
+
+    def _on_voice_utterance(self, text: str) -> None:
+        """Voice callback (watcher thread): hand off to a worker so neither the
+        audio path nor the Qt loop ever blocks on routing/execution."""
+        text = (text or "").strip()
+        if not text:
+            return
+        print(f"[curby-jarvis] heard: {text!r}", file=sys.stderr)
+        import threading
+        threading.Thread(
+            target=self._dispatch_utterance, args=(text,),
+            name="curby-dispatch", daemon=True,
+        ).start()
+
+    def _dispatch_utterance(self, text: str) -> None:
+        """Worker thread: route + execute one utterance with the live confirm gate."""
+        try:
+            res = self.handle(text, confirm=self._overlay_confirm)
+        except Exception as e:  # never let a bad utterance kill the listener
+            print(f"[curby-jarvis] dispatch error: {e!r}", file=sys.stderr)
+            return
+        tag = "ok" if res.ok else (res.error or "no-op")
+        print(f"[curby-jarvis] {tag} ({res.mechanism})", file=sys.stderr)
 
     # -- live confirm marshaling ----------------------------------------------
 
     def _overlay_confirm(self, card: PreviewCard, intent: Intent) -> bool:
         """Synchronous confirm gate for live mode — shows the frosted card and
-        blocks on the user's Confirm/Cancel, marshaled through the _Bridge.
+        blocks the calling worker thread on the user's Confirm/Cancel, marshaled
+        onto the Qt main thread through the _Bridge.
 
-        Only used in live mode (Qt running). The dry-run/--say-headless paths pass
-        confirm=None (auto-run safe, gate-cancel risky) so they never need Qt.
+        Serialized by `_confirm_lock` so two phrases can't race the same card.
+        Defaults to Cancel on timeout, so an irreversible action never fires
+        without an explicit human Confirm.
         """
-        # v0.1: the live confirm UI marshaling is wired in run_live's STT callback;
-        # this default refuses gated actions when no interactive loop is attached so
-        # an irreversible action never auto-fires without a human.
-        return False
+        import threading
+
+        with self._confirm_lock:
+            ev = threading.Event()
+            result = {"ok": False}
+
+            def show():  # runs on the Qt main thread
+                def on_confirm():
+                    result["ok"] = True
+                    ev.set()
+
+                def on_cancel():
+                    result["ok"] = False
+                    ev.set()
+
+                self._card.show_card(card, on_confirm=on_confirm, on_cancel=on_cancel)
+
+            self._run_on_main(show)
+            if not ev.wait(timeout=self._confirm_timeout_s):
+                self._run_on_main(self._card.dismiss)
+                return False
+            return result["ok"]
 
 
 # ---- _Bridge (QObject pyqtSignals) — built lazily, never at import ----------
@@ -364,6 +481,8 @@ def _make_bridge():
         utterance = pyqtSignal(str)
         # hide all overlays.
         hide_all = pyqtSignal()
+        # run a zero-arg callable on the Qt main thread (worker → UI marshal).
+        invoke = pyqtSignal(object)
 
     return _Bridge()
 
@@ -399,8 +518,112 @@ def build_arg_parser():
     p.add_argument("--vision", action="store_true",
                    help="enable Tier-2 vision labeling on an AX miss (needs key + capture)")
     p.add_argument("--live", action="store_true",
-                   help="run the hotkey + STT loop (degrades to a no-op without a mic)")
+                   help="run the full controller: voice in + gesture reticle + confirm")
+    p.add_argument("--check", action="store_true",
+                   help="preflight: probe + request mic/Speech/Accessibility, report status")
     return p
+
+
+def _open_settings_pane(anchor: str) -> None:
+    """Open a Privacy & Security settings pane (best-effort, darwin only)."""
+    if sys.platform != "darwin":
+        return
+    try:
+        import subprocess
+        subprocess.run(
+            ["open", f"x-apple.systempreferences:com.apple.preference.security?{anchor}"],
+            check=False,
+        )
+    except Exception:
+        pass
+
+
+def run_check() -> int:
+    """Preflight the live controller's capabilities and (re)request permissions.
+
+    Probes the Speech framework, requests Microphone + Speech Recognition access
+    (showing the OS prompts), checks the Accessibility grant the AX connectors
+    need, the `claude` agent floor, and the gesture websocket. Prints a human
+    report and opens the relevant Settings pane for anything denied. Returns 0
+    when voice input is usable (mic + speech authorized), else 2.
+    """
+    from . import stt
+
+    print("curby-jarvis preflight")
+    print("======================")
+
+    if not stt.speech_framework_available():
+        print("  speech framework : UNAVAILABLE (pip install "
+              "pyobjc-framework-Speech pyobjc-framework-AVFoundation)")
+        return 2
+
+    summary = stt.request_authorizations(timeout=30.0)
+    if "error" in summary:
+        print(f"  speech framework : ERROR — {summary['error']}")
+        return 2
+
+    speech_ok = summary.get("speech") == "authorized"
+    mic_ok = summary.get("mic") == "authorized"
+    print(f"  microphone       : {summary.get('mic')}")
+    print(f"  speech recognition: {summary.get('speech')}"
+          f"  (on-device: {'yes' if summary.get('on_device') else 'no'})")
+
+    # Accessibility — needed by the menu/deixis connectors (not voice itself).
+    try:
+        from .ax.ax_bridge import ax_available
+        ax_ok = bool(ax_available())
+    except Exception:
+        ax_ok = False
+    print(f"  accessibility    : {'trusted' if ax_ok else 'NOT trusted'}")
+
+    # Agent floor.
+    import shutil
+    claude = shutil.which("claude")
+    print(f"  agent floor      : {'claude @ ' + claude if claude else 'claude NOT on PATH'}")
+
+    # Gesture websocket (optional — deixis only).
+    import importlib.util
+    if importlib.util.find_spec("websockets") is None:
+        ws = "websockets dep missing"
+    else:
+        ws = _probe_pointer_ws()
+    print(f"  gesture ws       : {ws}")
+
+    # Guide the user to any pane that needs a toggle.
+    if not mic_ok:
+        _open_settings_pane("Privacy_Microphone")
+    if not speech_ok:
+        _open_settings_pane("Privacy_SpeechRecognition")
+    if not ax_ok:
+        _open_settings_pane("Privacy_Accessibility")
+
+    print()
+    if speech_ok and mic_ok:
+        print("  → voice input READY. Run:  curby-jarvis --live")
+        if not ax_ok:
+            print("    (grant Accessibility too for menu/click commands.)")
+        return 0
+    print("  → grant the permissions above (panes opened), then rerun --check.")
+    return 2
+
+
+def _probe_pointer_ws(timeout: float = 0.6) -> str:
+    """Best-effort one-shot connect to the hand-signal pointer websocket."""
+    import asyncio
+
+    async def _try() -> str:
+        import websockets
+        from .pointer.ws_client import DEFAULT_URL
+        try:
+            async with websockets.connect(DEFAULT_URL, open_timeout=timeout):
+                return f"reachable @ {DEFAULT_URL}"
+        except Exception:
+            return f"down @ {DEFAULT_URL} (start hand-signal for pointer/deixis)"
+
+    try:
+        return asyncio.run(_try())
+    except Exception:
+        return "probe failed"
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -408,6 +631,9 @@ def main(argv: Optional[list] = None) -> int:
 
     pointer = _parse_pointer(args.pointer)
     pointer2 = _parse_pointer(args.pointer2)
+
+    if args.check:
+        return run_check()
 
     jarvis = CurbyJarvis(vision=bool(args.vision))
 

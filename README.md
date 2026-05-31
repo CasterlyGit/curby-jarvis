@@ -4,8 +4,9 @@
 
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Tests](https://img.shields.io/badge/tests-248%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-272%20passing-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
+![Version](https://img.shields.io/badge/version-1.0.0-blueviolet)
 
 Point at something on your screen, say what to do with it, and it does it. curby-jarvis fuses a hand-gesture pointer with spoken intent and drives **any** macOS app — no per-app plugins, no scripting. A crosshair reticle tracks where you're aiming; a preview card shows the chosen action before it runs.
 
@@ -103,17 +104,40 @@ python -m curby_jarvis.app --say "move that there" --pointer 100,200 --pointer2 
 {"utterance": "move that there", "verb": "move", "needs_pointer": true, "chosen_connector": "deixis_click", "mechanism": "cgevent_drag", "risk": "ambiguous", "must_confirm": true, "gloss": "no element resolved here", "literal": "(100, 200) -> (800, 600)", "target_rect": null}
 ```
 
-Run the real loop (pointer stream → fusion → reticle HUD → utterance → route → confirm → execute):
+**Talk to it.** Preflight permissions once (opens the right Settings panes and
+requests Microphone + Speech Recognition), then run the live controller:
 
 ```bash
-python -m curby_jarvis.app --live
+python -m curby_jarvis.app --check   # mic / Speech / Accessibility / agent preflight
+python -m curby_jarvis.app --live    # on-device voice in → route → confirm → execute
+```
+
+In `--live`, recognition is **on-device** (macOS Speech framework — no API key, no
+network, no model download). Each finished phrase is lowered to an Intent, deixis
+is bound to the live gesture pointer, the cheapest confident connector runs, and
+irreversible actions raise the frosted confirm card first. The gesture reticle
+follows your fingertip whenever the [hand-signal](../hand-signal) daemon is up.
+Optional wake word: `export CURBY_WAKE=curby` to require "curby …" before a command.
+
+```
+say "open Spotify"        → launches Spotify          (auto)
+say "mute" / "next tab"   → media key / browser tab   (auto)
+say "close this window"   → menu-bar AX               (confirm)
+point + say "play this"   → AX press at the pointer    (auto)
 ```
 
 **CLI:**
 
 ```
-python -m curby_jarvis.app --say "<utterance>" [--dry-run] [--pointer X,Y] [--pointer2 X,Y] [--vision] [--live]
+python -m curby_jarvis.app --say "<utterance>" [--dry-run] [--pointer X,Y] [--pointer2 X,Y] [--vision]
+python -m curby_jarvis.app --live | --check
 ```
+
+**Permissions (one-time).** `--live` needs **Microphone** + **Speech Recognition**
+(System Settings › Privacy & Security) for voice; **Accessibility** for the
+menu-bar / point-and-click connectors; and **Automation** the first time a browser
+tab command runs. `--check` reports each and opens the pane for anything missing.
+App-launch and media-key commands need no permission at all.
 
 ---
 
@@ -132,7 +156,8 @@ python -m curby_jarvis.app --say "<utterance>" [--dry-run] [--pointer X,Y] [--po
 
 ```
 src/curby_jarvis/
-├── app.py                  CLI entrypoint + --live run loop
+├── app.py                  CLI entrypoint + --live controller + --check preflight
+├── stt.py                  on-device voice in (Speech framework + AVAudioEngine)
 ├── router.py               Hybrid CapabilityRouter (cost, -confidence) chain
 ├── rule_table.py           golden lowering: utterance -> verb/intent
 ├── intent.py               intent model + LLM parse seam
@@ -163,15 +188,24 @@ src/curby_jarvis/
 
 ## ✅ Status & tests
 
-**Status: v0.1 — headless-green (248 tests); live-machine integration pending.**
+**Status: v1.0 — full live controller. On-device voice in, gesture reticle, confirm-gated execution.**
 
-Fully headless suite (pointer fusion/calibration/ws-client, all 7 connectors, overlay reticle + preview card, `rule_table` golden lowering, and the golden harness that drives all 8 demos through the real CLI):
+The complete loop runs end-to-end: `--check` requests/reports the mic, Speech,
+Accessibility and agent prerequisites; `--live` listens on-device, routes each
+spoken phrase through the connector chain, binds deixis to the live pointer, and
+gates irreversible actions on the frosted confirm card. Everything below the
+voice layer stays fully headless-testable.
+
+Fully headless suite (on-device STT endpointing + utterance normalization, the
+live dispatch/confirm/reticle wiring with fakes, pointer fusion/calibration/ws-client,
+all 7 connectors, overlay reticle + preview card, `rule_table` golden lowering,
+and the golden harness that drives all 8 demos through the real CLI):
 
 ```bash
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q
 ```
 
-**248 passed, 1 skipped.**
+**272 passed, 1 skipped.**
 
 ---
 

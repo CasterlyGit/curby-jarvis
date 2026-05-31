@@ -15,6 +15,29 @@ _BEHAVIOR_CAN_JOIN_ALL_SPACES = 1 << 0
 _BEHAVIOR_STATIONARY = 1 << 4
 
 
+_ACTIVATION_POLICY_ACCESSORY = 1  # NSApplicationActivationPolicyAccessory
+
+
+def set_accessory_policy() -> None:
+    """Run as an accessory app: overlays float without a Dock icon or focus theft.
+
+    No-op on non-darwin or if pyobjc/AppKit is missing. The frosted confirm card
+    is still fully clickable — accessory apps may present panels and receive
+    clicks; only the activation policy (Dock presence / menu bar ownership)
+    changes, which is exactly right for an overlay-only controller.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        from AppKit import NSApplication
+
+        NSApplication.sharedApplication().setActivationPolicy_(
+            _ACTIVATION_POLICY_ACCESSORY
+        )
+    except Exception:
+        pass
+
+
 def make_always_visible(widget, *, click_through: bool = False) -> None:
     """Pin a Qt widget so it floats above every app on every space.
 
@@ -25,6 +48,17 @@ def make_always_visible(widget, *, click_through: bool = False) -> None:
     """
     if sys.platform != "darwin":
         return
+    # No real window server (offscreen/minimal Qt platform, e.g. CI): winId() does
+    # not back a valid NSView, so the AppKit calls below would dereference garbage
+    # and can segfault. There's nothing to pin without a compositor — bail.
+    try:
+        from PyQt6.QtGui import QGuiApplication
+
+        app = QGuiApplication.instance()
+        if app is not None and app.platformName() in ("offscreen", "minimal", ""):
+            return
+    except Exception:
+        pass
     try:
         import objc
 
