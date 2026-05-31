@@ -1,17 +1,38 @@
 # curby-jarvis
 
-**Voice + hand-gesture universal computer controller for macOS — point and say.**
+**Voice + hand-gesture universal computer controller for macOS — point at anything on screen, say what to do, and it does it.**
 
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Tests](https://img.shields.io/badge/tests-248%20passing-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
 
-Point at something on your screen, say what to do with it, and it does it. curby-jarvis fuses a hand-gesture pointer with spoken intent and drives **any** macOS app — no per-app plugins, no scripting. A crosshair reticle tracks where you're aiming; a preview card shows the chosen action before it runs.
+**Status:** v0.1 — 248 tests passing, headless-green; live-machine TCC (Accessibility permission) integration pending.
+
+A crosshair reticle tracks where your hand points. A JARVIS-style preview card shows the chosen action before it runs. A cost-ranked connector chain (7 connectors, cost 1–10) picks the cheapest mechanism that can do the job — and falls through gracefully if it can't, so nothing crashes silently.
 
 ---
 
-## 🎯 Point and say
+## Why
+
+Every "voice control" tool either needs per-app plugins or is too coarse-grained to be useful. curby-jarvis routes through the real macOS Accessibility layer, so it works with **any** app, in ranked order from the cheapest (no permissions needed) to the most capable (LLM + agent). Spoken deixis — *this*, *that*, *there* — binds to a precise screen point at the moment you speak, turning hand gestures into a second input channel on top of voice.
+
+---
+
+## Signal above the fold
+
+| What | Numbers |
+|---|---|
+| Test suite | 248 passed, 1 skipped — fully headless |
+| Connector chain | 7 connectors, cost 1–10, no-raise fallthrough |
+| Latency | `rule_table` hot path is the <5 ms route; LLM and agent paths are async |
+| Zero-TCC floor | `app_launch` (cost 1) works with no permissions at all |
+| Audit log | `--dry-run` emits JSON per decision to stdout; live events appended to `~/.curby/jarvis-events.jsonl` |
+| Point-and-say demos | 8 golden demos run as headless CLI subprocesses in the regression harness |
+
+---
+
+## Point and say
 
 The eight golden point-and-say demos. Each runs headless through the real CLI and emits a `--dry-run` audit record — these are the regression spec, not marketing.
 
@@ -30,7 +51,7 @@ The point-and-say move (`deixis_click`) is the core: spoken deixis (*this* / *th
 
 ---
 
-## 🧭 How it routes — the Hybrid CapabilityRouter
+## How it routes — the Hybrid CapabilityRouter
 
 The router is an **AX-grounded spine** (macOS Accessibility) holding a chain of pluggable connectors. Connectors are ordered by **`(cost, -confidence)`**: the **cheapest connector that is both confident and available wins**. A connector **never raises** — on failure it returns a `ConnectorResult` and the router **falls through** to the next one, so routing degrades gracefully instead of crashing.
 
@@ -48,7 +69,7 @@ Bottom of the chain is **zero-TCC** (URL-scheme / NSWorkspace, no permission gra
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```mermaid
 flowchart LR
@@ -73,7 +94,7 @@ flowchart LR
 
 ---
 
-## 📦 Install
+## Install
 
 ```bash
 pip install -e ".[dev]"
@@ -81,7 +102,7 @@ pip install -e ".[dev]"
 
 Requires Python 3.11+. Optional screen-capture extra: `pip install -e ".[vision]"`.
 
-## 🚀 Quickstart
+## Quickstart
 
 Inspect a decision with **zero side effects** — `--dry-run` emits the audit JSON (chosen connector, mechanism tag, risk, `must_confirm`):
 
@@ -117,18 +138,18 @@ python -m curby_jarvis.app --say "<utterance>" [--dry-run] [--pointer X,Y] [--po
 
 ---
 
-## 🛡️ Safety & observability
+## Safety & observability
 
 - **Irreversible actions confirm first.** The overlay preview card blocks on confirmation before executing anything irreversible.
 - **Secure-Input block.** When macOS Secure Input is active (a password field is focused), keystroke injection is refused.
 - **Watchdog-wrapped AX.** Every Accessibility call is timeout-wrapped — a timeout falls through to the next connector and never hangs.
 - **Connectors never raise.** Errors come back inside a `ConnectorResult`, so routing degrades gracefully instead of crashing.
 - **Mechanism tags.** Each connector's `.name` doubles as its telemetry mechanism tag.
-- **Audit JSON.** The `--dry-run` record is the inspectable, diffable decision log — and the source of truth for the golden harness.
+- **Audit JSONL.** Live decisions are appended to `~/.curby/jarvis-events.jsonl`. The `--dry-run` record is the inspectable, diffable decision log — and the source of truth for the golden harness.
 
 ---
 
-## 🗂️ Project layout
+## Project layout
 
 ```
 src/curby_jarvis/
@@ -161,20 +182,49 @@ src/curby_jarvis/
 
 ---
 
-## ✅ Status & tests
-
-**Status: v0.1 — headless-green (248 tests); live-machine integration pending.**
-
-Fully headless suite (pointer fusion/calibration/ws-client, all 7 connectors, overlay reticle + preview card, `rule_table` golden lowering, and the golden harness that drives all 8 demos through the real CLI):
+## Tests
 
 ```bash
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q
 ```
 
-**248 passed, 1 skipped.**
+**248 passed, 1 skipped.** Covers pointer fusion/calibration/ws-client, all 7 connectors, overlay reticle + preview card, `rule_table` golden lowering, and the golden harness that drives all 8 demos through the real CLI as subprocesses.
+
+---
+
+## Roadmap
+
+- [x] Hybrid CapabilityRouter with 7 connectors (cost 1–10)
+- [x] Deixis pipeline: hand-signal WS → pointer fusion → calibration → AX click
+- [x] JARVIS HUD: crosshair reticle + frosted preview card with confirm on irreversible
+- [x] Headless `--dry-run` audit JSON + 8-demo golden CLI harness
+- [x] 248-test headless suite
+- [ ] Live-machine TCC grant flow (macOS Accessibility permission walkthrough)
+- [ ] LLM intent-parse connector hooked to live Anthropic API
+- [ ] STT integration (speech-to-text feed into the utterance pipeline)
+- [ ] Multi-display calibration
+- [ ] Configurable connector cost overrides via config file
+
+---
+
+## Live demo
+
+[casterlygit.github.io/curby-jarvis](https://casterlygit.github.io/curby-jarvis/)
+
+---
+
+## Companion repos
+
+| Repo | Role |
+|---|---|
+| [hand-signal](https://github.com/CasterlyGit/hand-signal) | Gesture WebSocket server — the pointer source curby-jarvis consumes |
+| [curby](https://github.com/CasterlyGit/curby) | Voice command pipeline (STT → intent → TTS) |
+| [shed](https://github.com/CasterlyGit/shed) | Claude Code that learns your workflow |
+| [claude-meter](https://github.com/CasterlyGit/claude-meter) | Real-time Anthropic API token/cost overlay |
+| [metacortex](https://github.com/CasterlyGit/metacortex) | Agent orchestration layer |
 
 ---
 
 ## License
 
-MIT.
+MIT. See [LICENSE](LICENSE).
