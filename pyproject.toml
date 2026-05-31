@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "curby-jarvis"
+version = "0.1.0"
+description = "Voice + hand-gesture universal computer controller for macOS — point and say."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "PyQt6",
+    "pyobjc-framework-Cocoa",
+    "pyobjc-framework-Quartz",
+    "pyobjc-framework-ApplicationServices",
+    "websockets>=12.0",
+    "anthropic",
+    "numpy",
+    "Pillow",
+]
+
+[project.optional-dependencies]
+vision = ["mss"]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+curby-jarvis = "curby_jarvis.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

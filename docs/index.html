@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>curby-jarvis — point and say.</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #0a0b0d;
+    --bg-raise: #101319;
+    --bg-card: #0d1016;
+    --neon: #00e5ff;
+    --neon-dim: #0a8aa0;
+    --neon-soft: rgba(0, 229, 255, 0.10);
+    --fg: #e6edf3;
+    --muted: #7d8794;
+    --line: rgba(0, 229, 255, 0.14);
+    --line-strong: rgba(0, 229, 255, 0.32);
+    --danger: #ff5c7a;
+    --danger-dim: rgba(255, 92, 122, 0.14);
+    --ok: #58e07a;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans: "Space Grotesk", system-ui, -apple-system, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--sans);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    background-image:
+      radial-gradient(circle at 20% -10%, rgba(0, 229, 255, 0.08), transparent 45%),
+      radial-gradient(circle at 90% 0%, rgba(0, 229, 255, 0.05), transparent 40%),
+      linear-gradient(var(--line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    background-size: auto, auto, 48px 48px, 48px 48px;
+    background-position: 0 0, 0 0, -1px -1px, -1px -1px;
+    background-attachment: fixed, fixed, fixed, fixed;
+  }
+
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+
+  a { color: var(--neon); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .mono { font-family: var(--mono); }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.32em;
+    text-transform: uppercase;
+    color: var(--neon-dim);
+    margin: 0 0 14px;
+  }
+
+  /* ---------- HERO ---------- */
+  header.hero {
+    position: relative;
+    padding: 96px 0 72px;
+    border-bottom: 1px solid var(--line);
+    overflow: hidden;
+  }
+
+  .reticle {
+    position: absolute;
+    top: 50%; right: -90px;
+    transform: translateY(-50%);
+    width: 360px; height: 360px;
+    pointer-events: none;
+    opacity: 0.55;
+  }
+  .reticle .ring {
+    position: absolute; inset: 0;
+    border: 1px solid var(--line-strong);
+    border-radius: 50%;
+    box-shadow: 0 0 30px var(--neon-soft) inset, 0 0 30px var(--neon-soft);
+    animation: pulse 4s ease-in-out infinite;
+  }
+  .reticle .ring.r2 { inset: 56px; opacity: 0.7; animation-delay: 0.6s; }
+  .reticle .ring.r3 { inset: 120px; opacity: 0.5; animation-delay: 1.2s; }
+  .reticle .cross-h,
+  .reticle .cross-v {
+    position: absolute; background: var(--line-strong);
+  }
+  .reticle .cross-h { top: 50%; left: 8%; right: 8%; height: 1px; }
+  .reticle .cross-v { left: 50%; top: 8%; bottom: 8%; width: 1px; }
+  .reticle .dot {
+    position: absolute; top: 50%; left: 50%;
+    width: 8px; height: 8px; margin: -4px 0 0 -4px;
+    background: var(--neon); border-radius: 50%;
+    box-shadow: 0 0 12px var(--neon), 0 0 28px var(--neon);
+    animation: glow 2.4s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { transform: scale(1); opacity: 0.55; }
+    50% { transform: scale(1.04); opacity: 0.85; }
+  }
+  @keyframes glow {
+    0%, 100% { box-shadow: 0 0 8px var(--neon), 0 0 16px var(--neon); }
+    50% { box-shadow: 0 0 16px var(--neon), 0 0 40px var(--neon); }
+  }
+
+  h1.title {
+    position: relative; z-index: 2;
+    font-family: var(--mono);
+    font-size: clamp(40px, 8vw, 78px);
+    font-weight: 700;
+    margin: 0;
+    letter-spacing: -0.02em;
+    line-height: 1.02;
+  }
+  h1.title .accent {
+    color: var(--neon);
+    text-shadow: 0 0 18px var(--neon-soft), 0 0 40px var(--neon-soft);
+  }
+  .tagline {
+    position: relative; z-index: 2;
+    font-family: var(--mono);
+    font-size: clamp(20px, 3.4vw, 30px);
+    color: var(--neon);
+    margin: 18px 0 0;
+    letter-spacing: 0.04em;
+    text-shadow: 0 0 24px var(--neon-soft);
+  }
+  .tagline::before { content: "› "; color: var(--neon-dim); }
+  .subtitle {
+    position: relative; z-index: 2;
+    max-width: 600px;
+    color: var(--muted);
+    font-size: 17px;
+    margin: 22px 0 0;
+  }
+  .cta-row {
+    position: relative; z-index: 2;
+    margin-top: 36px;
+    display: flex; flex-wrap: wrap; gap: 14px; align-items: center;
+  }
+  .cta {
+    font-family: var(--mono);
+    font-size: 14px;
+    letter-spacing: 0.06em;
+    padding: 13px 22px;
+    border: 1px solid var(--neon);
+    border-radius: 4px;
+    color: var(--neon);
+    background: var(--neon-soft);
+    transition: all 0.18s ease;
+  }
+  .cta:hover {
+    text-decoration: none;
+    background: var(--neon);
+    color: var(--bg);
+    box-shadow: 0 0 24px var(--neon-soft), 0 0 48px var(--neon-soft);
+  }
+  .cta.ghost {
+    border-color: var(--line-strong);
+    color: var(--fg);
+    background: transparent;
+  }
+  .cta.ghost:hover {
+    background: var(--bg-raise);
+    color: var(--neon);
+    box-shadow: none;
+  }
+  .badges {
+    position: relative; z-index: 2;
+    margin-top: 28px;
+    display: flex; flex-wrap: wrap; gap: 8px;
+  }
+  .badges img { height: 20px; display: block; }
+
+  /* ---------- SECTION SCAFFOLD ---------- */
+  section { padding: 72px 0; border-bottom: 1px solid var(--line); }
+  h2.section-title {
+    font-family: var(--mono);
+    font-size: clamp(24px, 4vw, 34px);
+    font-weight: 700;
+    margin: 8px 0 6px;
+    letter-spacing: -0.01em;
+  }
+  h2.section-title .hash { color: var(--neon-dim); margin-right: 10px; }
+  .section-lead {
+    color: var(--muted);
+    max-width: 680px;
+    margin: 0 0 34px;
+  }
+
+  /* ---------- DEMO CARDS ---------- */
+  .demo-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px;
+  }
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 18px 18px 16px;
+    position: relative;
+    transition: border-color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+  }
+  .card::before {
+    content: "";
+    position: absolute; top: 10px; right: 10px;
+    width: 10px; height: 10px;
+    border-top: 1px solid var(--line-strong);
+    border-right: 1px solid var(--line-strong);
+  }
+  .card:hover {
+    border-color: var(--line-strong);
+    transform: translateY(-2px);
+    box-shadow: 0 0 0 1px var(--line-strong), 0 0 28px var(--neon-soft);
+  }
+  .card .gd {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.22em;
+    color: var(--neon-dim);
+    text-transform: uppercase;
+  }
+  .card .utterance {
+    font-family: var(--mono);
+    font-size: 16px;
+    color: var(--fg);
+    margin: 8px 0 14px;
+  }
+  .card .utterance .q { color: var(--neon); }
+  .card .meta { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    padding: 3px 9px;
+    border-radius: 3px;
+    border: 1px solid var(--line);
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .tag.connector { color: var(--neon); border-color: var(--line-strong); background: var(--neon-soft); }
+  .tag.confirm { color: var(--danger); border-color: var(--danger-dim); background: var(--danger-dim); }
+  .tag.safe { color: var(--ok); border-color: rgba(88, 224, 122, 0.22); }
+
+  /* ---------- ROUTER LADDER ---------- */
+  .ladder { display: flex; flex-direction: column; gap: 8px; }
+  .rung {
+    display: grid;
+    grid-template-columns: 78px 168px 1fr;
+    align-items: center;
+    gap: 16px;
+    background: var(--bg-card);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--neon-dim);
+    border-radius: 5px;
+    padding: 13px 16px;
+    transition: border-color 0.18s ease, background 0.18s ease;
+  }
+  .rung:hover { border-color: var(--line-strong); background: var(--bg-raise); }
+  .rung .cost {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--neon);
+    letter-spacing: 0.04em;
+  }
+  .rung .cost b { font-size: 19px; }
+  .rung .cname {
+    font-family: var(--mono);
+    font-size: 14px;
+    color: var(--fg);
+    font-weight: 500;
+  }
+  .rung .cdesc { color: var(--muted); font-size: 14px; }
+  .rung.tail { border-left-color: var(--danger); }
+  .rung.zero { border-left-color: var(--ok); }
+  .ladder-note {
+    margin-top: 18px;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .ladder-note .k { color: var(--neon); }
+
+  /* ---------- ARCH FLOW ---------- */
+  .flow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0;
+  }
+  .node {
+    flex: 1 1 130px;
+    min-width: 130px;
+    background: var(--bg-card);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 16px 14px;
+    text-align: center;
+  }
+  .node .nlabel {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--neon);
+    font-weight: 500;
+  }
+  .node .nsub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .arrow {
+    display: flex; align-items: center; justify-content: center;
+    flex: 0 0 38px;
+    color: var(--neon-dim);
+    font-family: var(--mono);
+    font-size: 22px;
+  }
+  .flow-cap {
+    margin-top: 18px;
+    color: var(--muted);
+    font-size: 14px;
+    max-width: 760px;
+  }
+
+  /* ---------- SAFETY / OBS COLUMNS ---------- */
+  .cols {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+  }
+  .panel {
+    background: var(--bg-card);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 22px;
+  }
+  .panel h3 {
+    font-family: var(--mono);
+    font-size: 15px;
+    letter-spacing: 0.04em;
+    margin: 0 0 14px;
+    color: var(--neon);
+  }
+  .panel ul { margin: 0; padding-left: 0; list-style: none; }
+  .panel li {
+    position: relative;
+    padding: 7px 0 7px 22px;
+    color: var(--fg);
+    font-size: 14px;
+    border-bottom: 1px solid var(--line);
+  }
+  .panel li:last-child { border-bottom: none; }
+  .panel li::before {
+    content: "+";
+    position: absolute; left: 0; top: 7px;
+    color: var(--neon-dim);
+    font-family: var(--mono);
+  }
+
+  /* ---------- FOOTER ---------- */
+  footer {
+    padding: 48px 0 64px;
+    text-align: center;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 13px;
+  }
+  footer .fline {
+    display: inline-flex; flex-wrap: wrap; gap: 10px 20px;
+    justify-content: center; align-items: center;
+  }
+  footer .sep { color: var(--line-strong); }
+
+  @media (max-width: 620px) {
+    .reticle { display: none; }
+    .rung { grid-template-columns: 64px 1fr; }
+    .rung .cdesc { grid-column: 1 / -1; }
+  }
+</style>
+</head>
+<body>
+
+  <!-- ===================== HERO ===================== -->
+  <header class="hero">
+    <div class="reticle" aria-hidden="true">
+      <span class="ring"></span>
+      <span class="ring r2"></span>
+      <span class="ring r3"></span>
+      <span class="cross-h"></span>
+      <span class="cross-v"></span>
+      <span class="dot"></span>
+    </div>
+    <div class="wrap">
+      <p class="eyebrow">macOS · voice + hand-gesture controller</p>
+      <h1 class="title">curby<span class="accent">-jarvis</span></h1>
+      <p class="tagline">point and say.</p>
+      <p class="subtitle">
+        A voice + hand-gesture universal computer controller for macOS. Aim at
+        anything on screen, speak a command, and a hybrid CapabilityRouter picks
+        the cheapest mechanism that can actually do it — from a zero-permission
+        app launch all the way down to an open-ended agent.
+      </p>
+      <div class="cta-row">
+        <a class="cta" href="https://github.com/CasterlyGit/curby-jarvis">View on GitHub →</a>
+        <a class="cta ghost" href="#demos">See the 8 demos</a>
+      </div>
+      <div class="badges">
+        <img src="https://img.shields.io/badge/python-3.11%2B-00e5ff?style=flat-square&labelColor=0a0b0d" alt="Python 3.11+" />
+        <img src="https://img.shields.io/badge/license-MIT-00e5ff?style=flat-square&labelColor=0a0b0d" alt="MIT License" />
+        <img src="https://img.shields.io/badge/tests-248%20passed-58e07a?style=flat-square&labelColor=0a0b0d" alt="248 tests passed" />
+        <img src="https://img.shields.io/badge/version-v0.1-00e5ff?style=flat-square&labelColor=0a0b0d" alt="Version 0.1" />
+        <img src="https://img.shields.io/badge/platform-macOS-7d8794?style=flat-square&labelColor=0a0b0d" alt="macOS" />
+      </div>
+    </div>
+  </header>
+
+  <!-- ===================== DEMOS ===================== -->
+  <section id="demos">
+    <div class="wrap">
+      <p class="eyebrow">golden harness</p>
+      <h2 class="section-title"><span class="hash">#</span>8 point-and-say demos</h2>
+      <p class="section-lead">
+        Every demo runs headless through the real CLI as a subprocess and emits a
+        diffable audit record. Each card shows the utterance, the connector the
+        router chose, the risk class, and whether an overlay confirm is required.
+      </p>
+      <div class="demo-grid">
+
+        <div class="card">
+          <div class="gd">GD1 · launch</div>
+          <div class="utterance">"open Spotify"</div>
+          <div class="meta">
+            <span class="tag connector">app_launch</span>
+            <span class="tag safe">launch</span>
+            <span class="tag">no-confirm</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="gd">GD2 · media</div>
+          <div class="utterance">"mute"</div>
+          <div class="meta">
+            <span class="tag connector">media_key</span>
+            <span class="tag safe">reversible</span>
+            <span class="tag">no-confirm</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="gd">GD3 · menu bar</div>
+          <div class="utterance">"close this window"</div>
+          <div class="meta">
+            <span class="tag connector">menubar_ax</span>
+            <span class="tag">irreversible</span>
+            <span class="tag confirm">CONFIRM</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="gd">GD4 · browser</div>
+          <div class="utterance">"next tab"</div>
+          <div class="meta">
+            <span class="tag connector">browser_tab</span>
+            <span class="tag safe">reversible</span>
+            <span class="tag">no-confirm</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="gd">GD5 · deixis</div>
+          <div class="utterance">"play <span class="q">this</span>" <span style="color:var(--muted)">+ pointer</span></div>
+          <div class="meta">
+            <span class="tag connector">deixis_click</span>
+            <span class="tag">deixis-bound</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="gd">GD6 · deixis</div>
+          <div class="utterance">"move <span class="q">that</span> there"</div>
+          <div class="meta">
+            <span class="tag connector">deixis_click</span>
+            <span class="tag">irreversible</span>
+            <span class="tag confirm">CONFIRM</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="gd">GD7 · ambiguous</div>
+          <div class="utterance">"play <span class="q">this</span>" <span style="color:var(--muted)">no pointer</span></div>
+          <div class="meta">
+            <span class="tag connector">deixis_click</span>
+            <span class="tag">ambiguous</span>
+            <span class="tag confirm">CONFIRM</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="gd">GD8 · fallback</div>
+          <div class="utterance">long open-ended utterance</div>
+          <div class="meta">
+            <span class="tag connector">agent_fallback</span>
+            <span class="tag">ambiguous</span>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== ROUTER ===================== -->
+  <section id="router">
+    <div class="wrap">
+      <p class="eyebrow">hybrid CapabilityRouter</p>
+      <h2 class="section-title"><span class="hash">#</span>The router</h2>
+      <p class="section-lead">
+        An AX-grounded spine holds a chain of pluggable connectors, ordered by
+        <span class="mono">(cost, −confidence)</span>. The cheapest connector that
+        is confident and available wins. A connector never raises — on failure it
+        returns a result and the router falls through to the next rung.
+      </p>
+      <div class="ladder">
+
+        <div class="rung zero">
+          <div class="cost"><b>1</b></div>
+          <div class="cname">app_launch</div>
+          <div class="cdesc">NSWorkspace + URL scheme open. No TCC permission needed — the cheapest tier.</div>
+        </div>
+
+        <div class="rung">
+          <div class="cost"><b>2</b></div>
+          <div class="cname">media_key</div>
+          <div class="cdesc">Auxiliary HID media keys (play / pause / mute / next). Reversible, no confirm.</div>
+        </div>
+
+        <div class="rung">
+          <div class="cost"><b>3</b></div>
+          <div class="cname">menubar_ax</div>
+          <div class="cdesc">Drives the focused app's menu bar via Accessibility.</div>
+        </div>
+
+        <div class="rung">
+          <div class="cost"><b>4</b></div>
+          <div class="cname">deixis_click</div>
+          <div class="cdesc">The point-and-say effector: AX press at the fused pointer — "play THIS", "move THAT there".</div>
+        </div>
+
+        <div class="rung">
+          <div class="cost"><b>6</b></div>
+          <div class="cname">browser_tab</div>
+          <div class="cdesc">Browser tab control via warm osascript.</div>
+        </div>
+
+        <div class="rung">
+          <div class="cost"><b>8</b></div>
+          <div class="cname">intent (LLM)</div>
+          <div class="cdesc">LLM intent-parse seam.</div>
+        </div>
+
+        <div class="rung tail">
+          <div class="cost"><b>10</b></div>
+          <div class="cname">agent_fallback</div>
+          <div class="cdesc">Open-ended last resort — shells to <span class="mono">claude -p</span>. Always available.</div>
+        </div>
+
+      </div>
+      <p class="ladder-note">
+        <span class="k">tiebreak:</span> cheaper cost wins; equal cost → higher
+        confidence wins. <span class="k">.name</span> doubles as the mechanism tag
+        in telemetry.
+      </p>
+    </div>
+  </section>
+
+  <!-- ===================== ARCHITECTURE FLOW ===================== -->
+  <section id="flow">
+    <div class="wrap">
+      <p class="eyebrow">live run loop</p>
+      <h2 class="section-title"><span class="hash">#</span>From point to action</h2>
+      <p class="section-lead">
+        The pointer stream and the spoken utterance fuse into a single intent,
+        the router lowers it to a connector, the HUD previews the action and asks
+        confirm for irreversible ones, then it executes.
+      </p>
+      <div class="flow">
+        <div class="node"><div class="nlabel">pointer ws</div><div class="nsub">hand-signal gestures</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="nlabel">fusion</div><div class="nsub">aimed · fresh · confident</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="nlabel">utterance</div><div class="nsub">voice command</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="nlabel">router</div><div class="nsub">cost-ranked lowering</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="nlabel">HUD confirm</div><div class="nsub">reticle + preview card</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="nlabel">execute</div><div class="nsub">connector fires</div></div>
+      </div>
+      <p class="flow-cap">
+        <span class="mono">--dry-run</span> stops at the router and emits the audit
+        JSON — chosen connector, mechanism tag, risk, must_confirm — with zero
+        side effects. <span class="mono">--live</span> runs the full loop.
+      </p>
+    </div>
+  </section>
+
+  <!-- ===================== SAFETY + OBSERVABILITY ===================== -->
+  <section id="safety">
+    <div class="wrap">
+      <p class="eyebrow">guarantees</p>
+      <h2 class="section-title"><span class="hash">#</span>Safety &amp; observability</h2>
+      <div class="cols">
+        <div class="panel">
+          <h3>SAFETY</h3>
+          <ul>
+            <li>Irreversible actions require an overlay confirm before executing.</li>
+            <li>Secure-Input detection blocks keystroke injection at password fields.</li>
+            <li>Every AX call is watchdog-wrapped — a timeout falls through, never hangs.</li>
+            <li>Connectors never raise; errors return in the result so routing degrades gracefully.</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h3>OBSERVABILITY</h3>
+          <ul>
+            <li>Each connector's <span class="mono">.name</span> is its mechanism tag in telemetry.</li>
+            <li>The dry-run audit JSON is an inspectable, diffable decision record.</li>
+            <li>The golden harness drives all 8 demos through the real CLI.</li>
+            <li>248 passed, 1 skipped — fully headless under <span class="mono">QT_QPA_PLATFORM=offscreen</span>.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== FOOTER ===================== -->
+  <footer>
+    <div class="wrap">
+      <div class="fline">
+        <span>curby-jarvis</span>
+        <span class="sep">·</span>
+        <span>v0.1</span>
+        <span class="sep">·</span>
+        <span>MIT License</span>
+        <span class="sep">·</span>
+        <a href="https://github.com/CasterlyGit/curby-jarvis">github.com/CasterlyGit/curby-jarvis</a>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>
