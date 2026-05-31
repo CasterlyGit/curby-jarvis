@@ -140,23 +140,23 @@ class TestMCPConnectorAdapter:
             call_tool=call_tool,
         )
 
-    # -- name --
+    # -- name (sanitized for Anthropic tool-name rules: ^[a-zA-Z0-9_-]{1,64}$) --
     def test_name_includes_server_and_tool(self):
         adapter = self._make_adapter(server="myserver", tool_name="mytool")
-        assert adapter.name == "mcp:myserver:mytool"
+        assert adapter.name == "mcp_myserver_mytool"
 
-    # -- can_handle --
-    def test_can_handle_returns_1_when_mcp_tool_matches(self):
+    # -- can_handle (agent loop selects by sanitized name == intent.verb) --
+    def test_can_handle_returns_1_when_verb_matches_name(self):
         adapter = self._make_adapter(tool_name="do_thing")
-        intent = _make_intent(args={"mcp_tool": "do_thing", "x": 1})
+        intent = _make_intent(verb=adapter.name, args={"x": 1})
         assert adapter.can_handle(intent) == 1.0
 
-    def test_can_handle_returns_0_when_mcp_tool_differs(self):
+    def test_can_handle_returns_0_when_verb_differs(self):
         adapter = self._make_adapter(tool_name="do_thing")
-        intent = _make_intent(args={"mcp_tool": "other_tool"})
+        intent = _make_intent(verb="mcp_srv_other_tool")
         assert adapter.can_handle(intent) == 0.0
 
-    def test_can_handle_returns_0_when_no_mcp_tool_arg(self):
+    def test_can_handle_returns_0_for_unrelated_verb(self):
         adapter = self._make_adapter(tool_name="do_thing")
         intent = _make_intent(verb="open", target="Spotify")
         assert adapter.can_handle(intent) == 0.0
@@ -175,7 +175,7 @@ class TestMCPConnectorAdapter:
         result = adapter.execute(intent)
 
         assert result.ok is True
-        assert result.mechanism == "mcp:srv:write_file"
+        assert result.mechanism == "mcp_srv_write_file"
         assert received["name"] == "write_file"
         assert "mcp_tool" not in received["args"]
         assert received["args"]["path"] == "/tmp/f.txt"
@@ -209,7 +209,7 @@ class TestMCPConnectorAdapter:
         schema = {"type": "object", "properties": {"x": {"type": "number"}}}
         adapter = self._make_adapter(tool_name="my_tool", input_schema=schema)
         ts = adapter.tool_schema()
-        assert ts["name"] == "mcp:srv:my_tool"
+        assert ts["name"] == "mcp_srv_my_tool"
         assert ts["input_schema"] == schema
 
     # -- is_available with breaker --
@@ -270,8 +270,8 @@ class TestIntegration:
             call_tool=fake_call,
         )
 
-        intent_match = _make_intent(args={"mcp_tool": "summarise", "text": "hello"})
-        intent_miss = _make_intent(args={"mcp_tool": "other_tool"})
+        intent_match = _make_intent(verb=adapter.name, args={"text": "hello"})
+        intent_miss = _make_intent(verb="mcp_test_server_other_tool")
 
         assert adapter.can_handle(intent_match) == 1.0
         assert adapter.can_handle(intent_miss) == 0.0

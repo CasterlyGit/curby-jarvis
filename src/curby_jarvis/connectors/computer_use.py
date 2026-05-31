@@ -55,7 +55,9 @@ class ComputerUseConnector(Connector):
     # -------------------------------------------------------------------------
 
     def can_handle(self, intent: Intent) -> float:
-        if intent.args.get("pixel") or intent.verb == "agent_task":
+        # Also match when the agent loop selects this tool by name (verb ==
+        # 'computer_use'), not just the explicit pixel/agent_task paths.
+        if intent.args.get("pixel") or intent.verb in ("agent_task", "computer_use"):
             return 0.1
         return 0.0
 

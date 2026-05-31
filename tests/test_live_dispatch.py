@@ -171,7 +171,7 @@ def test_dispatch_routes_through_router_with_confirm_gate():
             return ConnectorResult(ok=True, mechanism="media_key")
 
     j.build_router = lambda: _FakeRouter()
-    j._resolve_live = lambda text: Intent(verb="mute", raw_utterance=text)
+    j._resolve_live = lambda text, spec_intent=None: Intent(verb="mute", raw_utterance=text)
 
     tok = CancellationToken()
     j._dispatch_utterance("mute", tok)

@@ -70,6 +70,16 @@ class SessionState:
         except Exception:
             self._conn = None
 
+    def close(self) -> None:
+        """Explicitly close the SQLite connection. Idempotent + never raises —
+        called from app.run_live's finally so no -wal file lingers after exit."""
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
     # -- action log -----------------------------------------------------------
 
     def record_action(

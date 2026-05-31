@@ -81,6 +81,11 @@ class AgentFallbackConnector(Connector):
     # -- contract ------------------------------------------------------------
 
     def can_handle(self, intent: Intent) -> float:
+        # Never catch a sub-intent the agent loop dispatched — otherwise an
+        # unroutable tool verb would spawn a fresh `claude -p` instead of being
+        # reported back to the loop as an unhandled tool.
+        if intent.args.get("_via_agent_loop"):
+            return 0.0
         # Explicit agent task -> full confidence. Anything else -> the catch-all
         # floor so the chain always has a terminating candidate.
         if intent.verb == "agent_task":

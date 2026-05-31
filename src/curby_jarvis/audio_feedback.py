@@ -149,6 +149,13 @@ class SentenceAggregator:
 # speak_sentence
 # ---------------------------------------------------------------------------
 
+# Module-level list that holds AVSpeechSynthesizer instances alive until they
+# finish speaking.  AVSpeechSynthesizer.speakUtterance_ is asynchronous; if the
+# synthesizer is GC'd before it finishes the utterance is silently truncated.
+# Entries are pruned on each call (isSpeaking == False → safe to release).
+_active_synths: list = []
+
+
 def speak_sentence(text: str, voice: Optional[str] = None) -> None:
     """Speak *text* on-device via AVSpeechSynthesizer (zero API, zero network).
 
@@ -165,12 +172,16 @@ def speak_sentence(text: str, voice: Optional[str] = None) -> None:
         return
     try:
         import AVFoundation  # type: ignore
+        # Prune finished synthesizers before adding a new one.
+        _active_synths[:] = [s for s in _active_synths if s.isSpeaking()]
         synth = AVFoundation.AVSpeechSynthesizer.alloc().init()
         utterance = AVFoundation.AVSpeechUtterance.speechUtteranceWithString_(text)
         if voice is not None:
             av_voice = AVFoundation.AVSpeechSynthesisVoice.voiceWithLanguage_(voice)
             if av_voice is not None:
                 utterance.setVoice_(av_voice)
+        # Keep synth alive past this function's return — speakUtterance_ is async.
+        _active_synths.append(synth)
         synth.speakUtterance_(utterance)
     except Exception:
         # AVFoundation not available (CI / non-macOS) — silent no-op.

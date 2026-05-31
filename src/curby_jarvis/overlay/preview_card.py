@@ -744,6 +744,7 @@ if not HEADLESS:
                 return
             self._fired = True
             self._dismiss.stop()
+            self._ink_timer.stop()  # stop the 2fps luminance sampler on a hidden card
             cb = self._on_confirm
             self.hide()
             if cb is not None:
@@ -754,6 +755,7 @@ if not HEADLESS:
                 return
             self._fired = True
             self._dismiss.stop()
+            self._ink_timer.stop()  # stop the 2fps luminance sampler on a hidden card
             cb = self._on_cancel
             self.hide()
             if cb is not None:

@@ -230,6 +230,14 @@ class TaskRunner:
                 detail=str(exc),
             )
 
+        # The agent loop wraps every on_event call in `except Exception: pass`
+        # (its contract), so a _CancelSignal raised mid-stream is swallowed there
+        # and never reaches the handler above. Honour the sentinel post-return so
+        # barge-in actually cancels instead of returning ok=True.
+        if cancelled_at:
+            return ConnectorResult(ok=False, mechanism="task_engine", error="cancelled",
+                                   steps=getattr(res, "steps", 0))
+
         # Record the agentic run as a single session action
         if self._session is not None:
             try:

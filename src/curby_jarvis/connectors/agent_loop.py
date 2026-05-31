@@ -42,6 +42,7 @@ class AgentLoopConnector(Connector):
         dispatch: Optional[Callable[[Intent], ConnectorResult]] = None,
         tools_provider: Optional[Callable[[], list[dict]]] = None,
         client_factory: Optional[Callable] = None,
+        confirm: Optional[Callable] = None,
         model: str = "claude-haiku-4-5-20251001",
         max_steps: int = 12,
     ):
@@ -51,14 +52,31 @@ class AgentLoopConnector(Connector):
         self._tools_provider = tools_provider if tools_provider is not None else lambda: []
         # client_factory: lazily builds an Anthropic client; tests inject a fake.
         self._client_factory = client_factory
+        # confirm gate forwarded to every sub-dispatch so the loop can't run a
+        # RISK_IRREVERSIBLE/AMBIGUOUS tool without the human approving it.
+        self._confirm = confirm
         self._model = model
         self._max_steps = max_steps
         # lazy client cache — built on first use
         self._client = None
+        # Does the injected dispatch accept a 2nd (confirm) arg? router.run does;
+        # a 1-arg test fake does not. Probe once so we forward confirm safely.
+        self._dispatch_takes_confirm = False
+        if dispatch is not None:
+            try:
+                import inspect
+                params = inspect.signature(dispatch).parameters
+                self._dispatch_takes_confirm = ("confirm" in params or len(params) >= 2)
+            except (ValueError, TypeError):
+                self._dispatch_takes_confirm = False
 
     # -- contract ---------------------------------------------------------------
 
     def can_handle(self, intent: Intent) -> float:
+        # Never re-enter the loop on a sub-intent the loop itself dispatched
+        # (prevents recursive LLM fan-out when a tool verb matches no connector).
+        if intent.args.get("_via_agent_loop"):
+            return 0.0
         # Full confidence for explicit agent_task; catch-all above agent_fallback's 0.05.
         if intent.verb == "agent_task":
             return 1.0
@@ -154,10 +172,15 @@ class AgentLoopConnector(Connector):
                 if getattr(block, "type", None) != "tool_use":
                     continue
 
+                # Enforce the hard cap inside the block loop too — a single
+                # response can pack >max_steps tool_use blocks (the outer while
+                # check alone would let them all through).
+                if steps >= self._max_steps:
+                    break
+
                 tool_id = getattr(block, "id", f"tool_{steps}")
                 tool_name = getattr(block, "name", "")
                 tool_input = dict(getattr(block, "input", {}) or {})
-                tool_input["raw_utterance"] = intent.raw_utterance
 
                 # Emit tool_call progress event.
                 try:
@@ -170,10 +193,33 @@ class AgentLoopConnector(Connector):
                 except Exception:
                     pass
 
-                # Build Intent and dispatch through the router.
-                sub_intent = intent_from_tool_input({**tool_input, "verb": tool_name or "agent_task"})
+                # Map the tool_use back to a routable Intent. CRITICAL: the tool
+                # NAME identifies the connector, but the ACTION is the verb the
+                # model chose (tool_input['verb']) — do NOT overwrite verb with the
+                # tool name (that breaks can_handle for every verb-routed connector).
+                # MCP adapters + computer_use are addressed by their tool name.
+                model_verb = tool_input.get("verb")
+                t_args = dict(tool_input.get("args") or {})
+                t_args["_via_agent_loop"] = True  # block re-entry into the open-ended agents
+                tname = tool_name or ""
+                if tname.startswith("mcp_") or tname.startswith("mcp:"):
+                    verb = tname                       # MCP adapter matches its sanitized name
+                elif tname == "computer_use":
+                    verb = "computer_use"
+                    t_args["pixel"] = True
+                else:
+                    verb = model_verb or tname or "agent_task"  # regular connector: model's verb
+                sub_intent = intent_from_tool_input({
+                    "verb": verb,
+                    "target": tool_input.get("target", ""),
+                    "args": t_args,
+                    "raw_utterance": intent.raw_utterance,
+                })
                 try:
-                    dispatch_result = self._dispatch(sub_intent)
+                    if self._dispatch_takes_confirm:
+                        dispatch_result = self._dispatch(sub_intent, self._confirm)
+                    else:
+                        dispatch_result = self._dispatch(sub_intent)
                 except Exception as exc:
                     dispatch_result = ConnectorResult(ok=False, mechanism=self.name,
                                                       error="dispatch_error", detail=repr(exc))

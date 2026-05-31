@@ -50,13 +50,17 @@ class MCPConnectorAdapter(Connector):
         self._input_schema = input_schema
         self._call_tool = call_tool
         # name is a class attribute on Connector; we override per-instance.
-        self.name = f"mcp:{server}:{tool_name}"
+        # Anthropic tool names must match ^[a-zA-Z0-9_-]{1,64}$ — colons are
+        # rejected, so sanitize. The agent loop dispatches sub-intents with
+        # verb == this sanitized name, so can_handle matches on the verb.
+        import re
+        self.name = re.sub(r"[^a-zA-Z0-9_-]", "_", f"mcp_{server}_{tool_name}")[:64]
 
     # -- Connector interface --------------------------------------------------
 
     def can_handle(self, intent: Intent) -> float:
-        """1.0 only when the agent loop explicitly selects this tool by name."""
-        return 1.0 if intent.args.get("mcp_tool") == self._tool_name else 0.0
+        """1.0 only when the agent loop selects this tool by its sanitized name."""
+        return 1.0 if intent.verb == self.name else 0.0
 
     def is_available(self, intent: Intent) -> bool:
         """Available while the circuit breaker is not open."""
@@ -87,8 +91,10 @@ class MCPConnectorAdapter(Connector):
         """Map intent.args to call_tool, wrap result in ConnectorResult. Never raises."""
         t0 = time.monotonic()
         try:
-            # Pass intent.args minus internal routing keys as the tool args.
-            args = {k: v for k, v in intent.args.items() if k != "mcp_tool"}
+            # Pass intent.args minus internal routing keys (mcp_tool + any
+            # _-prefixed sentinels like _via_agent_loop) as the tool args.
+            args = {k: v for k, v in intent.args.items()
+                    if k != "mcp_tool" and not k.startswith("_")}
             result = self._call_tool(self._tool_name, args)
             lat = (time.monotonic() - t0) * 1000.0
 

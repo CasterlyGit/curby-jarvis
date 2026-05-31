@@ -111,6 +111,7 @@ class CurbyJarvis:
         self._cancel = None          # CancellationToken for the in-flight utterance (INF-12)
         self._spec_intent = None     # cached speculative parse (INF-09)
         self._cur_phase = "idle"
+        self._settle_gen = 0         # generation guard so a stale idle-timer can't fire mid-dispatch
         import threading
         self._confirm_lock = threading.Lock()  # one confirm card prompts at a time
         self._confirm_timeout_s = 30.0          # auto-Cancel a gated action if ignored
@@ -178,7 +179,9 @@ class CurbyJarvis:
                 return [c.tool_schema() for c in router.connectors
                         if c.name not in ("agent_loop", "agent_fallback")]
 
-            self._agent_loop = AgentLoopConnector(dispatch=router.run, tools_provider=_tools)
+            self._agent_loop = AgentLoopConnector(
+                dispatch=router.run, tools_provider=_tools,
+                confirm=self._overlay_confirm)  # gate every sub-tool the loop runs
             self._router.register(self._agent_loop)
         except Exception as e:
             print(f"[curby-jarvis] agent loop unavailable: {e}", file=sys.stderr)
@@ -402,6 +405,16 @@ class CurbyJarvis:
                 self._pointer_stream().stop()
             except Exception:
                 pass
+            try:
+                if self._ret_timer is not None:
+                    self._ret_timer.stop()  # don't poll a stopped stream / dead widget
+            except Exception:
+                pass
+            try:
+                if self._session is not None:
+                    self._session.close()  # flush + close the SQLite session store
+            except Exception:
+                pass
 
     def _ensure_overlay(self):
         """Lazily build the _Bridge + all HUD surfaces on the Qt main thread, and
@@ -500,6 +513,9 @@ class CurbyJarvis:
             ph = getattr(meta, "phase", "")
             if ph in ("understanding", "planning", "acting"):
                 self._card.show_status(ph, getattr(meta, "text", ""))
+            elif ph == "done" and getattr(meta, "latency", None):
+                # UI-07: 'DID IT IN N ms' count-up chip on success.
+                self._card.show_done(meta.latency)
         except Exception:
             pass
 
@@ -574,6 +590,7 @@ class CurbyJarvis:
         arc itself is driven by the gesture stream surfacing confirm_progress."""
         pend = getattr(self, "_pending_confirm", None)
         if pend is not None:
+            self._safe_call(self._bridge.confirm_progress.emit, 1.0)  # snap arc to full
             pend["ok"] = True
             pend["ev"].set()
 
@@ -602,10 +619,21 @@ class CurbyJarvis:
 
     def _settle_idle(self, delay_ms: int = 1400) -> None:
         """Return the HUD to idle a beat after a terminal phase, so DONE/ERROR are
-        seen before the orb quiets. Best-effort QTimer; no-op headless."""
+        seen before the orb quiets. The QTimer is created ON THE MAIN THREAD (via
+        _run_on_main) — a singleShot scheduled from the worker thread has no event
+        loop and silently never fires. Guarded by a generation counter so a stale
+        timer from a prior dispatch can't fire 'idle' over an active next one."""
         try:
             from PyQt6.QtCore import QTimer
-            QTimer.singleShot(delay_ms, lambda: self._bridge.phase.emit("idle"))
+            self._settle_gen += 1
+            gen = self._settle_gen
+
+            def _arm():
+                QTimer.singleShot(
+                    delay_ms,
+                    lambda: self._bridge.phase.emit("idle") if self._settle_gen == gen else None,
+                )
+            self._run_on_main(_arm)
         except Exception:
             pass
 
@@ -686,13 +714,21 @@ class CurbyJarvis:
             self._bridge.partial.emit(text)
         except Exception:
             pass
-        # One cheap speculative parse per phrase, once it's substantial.
+        # One cheap speculative parse per phrase, once it's substantial. Run it on
+        # a daemon thread — speculative_parse is a ~700ms HTTP call and _on_partial
+        # runs on the Speech framework's delivery queue; blocking it here would
+        # delay every subsequent partial AND the isFinal endpoint callback.
         if not getattr(self, "_spec_done", False) and len(text.split()) >= 6:
             self._spec_done = True
-            try:
-                self._spec_intent = self.intent_parser().speculative_parse(text)
-            except Exception:
-                self._spec_intent = None
+            _text = text
+
+            def _run_spec():
+                try:
+                    self._spec_intent = self.intent_parser().speculative_parse(_text)
+                except Exception:
+                    self._spec_intent = None
+            import threading
+            threading.Thread(target=_run_spec, name="curby-spec", daemon=True).start()
 
     def _on_voice_utterance(self, text: str) -> None:
         """Voice callback (watcher thread): acknowledge, barge-in over any in-flight
@@ -709,26 +745,41 @@ class CurbyJarvis:
     def _spawn_dispatch(self, text: str) -> None:
         """Barge-in: cancel the in-flight utterance, then start a fresh cancellable
         worker for this one (INF-12). The old worker sees its token flip and bails
-        between atomic steps instead of stacking unbounded threads."""
-        if self._cancel is not None:
-            self._cancel.cancel()
-        token = CancellationToken()
-        self._cancel = token
+        between atomic steps instead of stacking unbounded threads.
+
+        Held under _dispatch_lock because two threads call this — the STT watcher
+        (_on_voice_utterance) and the Qt main thread (_on_gesture swipe verbs) —
+        and they must not race the cancel/assign of self._cancel."""
         import threading
-        threading.Thread(
-            target=self._dispatch_utterance, args=(text, token),
-            name="curby-dispatch", daemon=True,
-        ).start()
+        with self._dispatch_lock:
+            if self._cancel is not None:
+                self._cancel.cancel()
+            # Resolve any open confirm card so a worker blocked in _overlay_confirm's
+            # ev.wait() exits immediately instead of lingering for the 30s timeout —
+            # makes barge-in feel instant and prevents two live dispatch workers.
+            pend = getattr(self, "_pending_confirm", None)
+            if pend is not None:
+                pend["ok"] = False
+                pend["ev"].set()
+            token = CancellationToken()
+            self._cancel = token
+            threading.Thread(
+                target=self._dispatch_utterance, args=(text, token),
+                name="curby-dispatch", daemon=True,
+            ).start()
 
     def _dispatch_utterance(self, text: str, token: "CancellationToken") -> None:
         """Worker thread: narrate phases, resolve, route + execute with the live
         confirm gate, then record + offer undo. Cancellable at every boundary."""
         import time
         t0 = time.time()
+        # Snapshot + clear the speculative-parse cache up front (single assignment
+        # is atomic under the GIL) so a barge-in worker can't read a stale spec.
+        spec_intent = self._spec_intent
+        self._spec_intent = None
         try:
             self._emit_phase("understanding", text=text)
-            intent = self._resolve_live(text)
-            self._spec_intent = None
+            intent = self._resolve_live(text, spec_intent=spec_intent)
             t_resolved = time.time()
             if token.cancelled():
                 return
@@ -779,10 +830,16 @@ class CurbyJarvis:
     def _run_agentic(self, intent: Intent, token) -> "object":
         """Drive the open-ended path through the multi-step task engine (INF-08):
         per-step progress + cancellation + session ledger around the agent loop."""
+        _on_chain = lambda name, ok: self._bridge.chain.emit(name, ok)
+        router = self.build_router()
         try:
             from .task_engine import TaskRunner
             runner = TaskRunner(
-                dispatch=self.build_router().run,
+                # Wrap router.run so the chain ring + progress + cancel reach the HUD
+                # for agent-task steps too (not just the single-verb path).
+                dispatch=lambda i, confirm=None: router.run(
+                    i, confirm=confirm, on_chain=_on_chain,
+                    on_event=self._on_progress, cancel_token=token),
                 confirm=self._overlay_confirm,
                 on_progress=self._on_progress,
                 cancel_token=token,
@@ -791,8 +848,8 @@ class CurbyJarvis:
             return runner.run_agentic(intent, self._agent_loop)
         except Exception:
             # Fall back to a direct streamed agent-loop run if the engine is absent.
-            return self.build_router().run(
-                intent, confirm=self._overlay_confirm,
+            return router.run(
+                intent, confirm=self._overlay_confirm, on_chain=_on_chain,
                 on_event=self._on_progress, cancel_token=token)
 
     def _on_progress(self, ev) -> None:
@@ -816,18 +873,28 @@ class CurbyJarvis:
         if sess is None:
             return
         label = f"{intent.verb} {intent.target}".strip() or intent.verb
-        try:
-            sess.record_action(intent.verb, intent.target, res.mechanism, bool(res.ok),
-                               risk=intent.risk)
-        except Exception:
-            pass
+        undo_id = None
         if res.ok and getattr(res, "undo_fn", None) is not None:
             try:
-                sess.push_undo(label, res.undo_fn)
+                undo_id = sess.push_undo(label, res.undo_fn)
                 if self._card is not None:
                     self._run_on_main(
                         lambda: self._safe_call(self._card.show_undo_toast, label, 5,
                                                 self._undo_action))
+            except Exception:
+                undo_id = None
+        try:
+            sess.record_action(intent.verb, intent.target, res.mechanism, bool(res.ok),
+                               risk=intent.risk, undo_label=(label if undo_id else None))
+        except Exception:
+            pass
+        # Surface undo_id into the telemetry JSONL so the history overlay (UI-11)
+        # can render an Undo chip on this row.
+        if undo_id:
+            try:
+                from .telemetry import emit as _tel_emit
+                _tel_emit(surface="operational", verb=intent.verb, target=intent.target,
+                          mechanism=res.mechanism, ok=True, risk=intent.risk, undo_id=undo_id)
             except Exception:
                 pass
 
@@ -867,10 +934,11 @@ class CurbyJarvis:
         except Exception:
             pass
 
-    def _resolve_live(self, text: str) -> Intent:
+    def _resolve_live(self, text: str, spec_intent=None) -> Intent:
         """Live resolve: filler-normalize, rule-table fast path, then the cached
         speculative parse (INF-09) before a cold parse, then bind deixis. Kept
-        separate from resolve()/handle() so the golden/dry-run contract is untouched."""
+        separate from resolve()/handle() so the golden/dry-run contract is untouched.
+        spec_intent is the snapshot the caller cleared, avoiding a shared-state read."""
         from .rule_table import lower
         try:
             from .nlp_utils import normalize_transcript
@@ -879,7 +947,7 @@ class CurbyJarvis:
             norm = text
         intent = lower(norm)
         if intent is None:
-            spec = self._spec_intent
+            spec = spec_intent
             first = norm.lower().split()[0] if norm.split() else ""
             if (spec is not None and spec.verb
                     and (spec.raw_utterance or "").lower().startswith(first)):
@@ -914,6 +982,7 @@ class CurbyJarvis:
             self._pending_confirm = pend
 
             def show():  # runs on the Qt main thread
+                self._safe_call(self._bridge.confirm_progress.emit, 0.0)  # reset pinch arc
                 def on_confirm():
                     pend["ok"] = True
                     ev.set()
@@ -932,6 +1001,7 @@ class CurbyJarvis:
                 return pend["ok"]
             finally:
                 self._pending_confirm = None
+                self._run_on_main(lambda: self._safe_call(self._bridge.confirm_progress.emit, 0.0))
 
 
 # ---- _Bridge (QObject pyqtSignals) — built lazily, never at import ----------
