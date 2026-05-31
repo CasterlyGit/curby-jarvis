@@ -180,3 +180,154 @@ def test_widget_constructs_and_api_smoke():
     w.hide()
     assert w._mode is None
     del app
+
+
+# --------------------------------------------------------------------------- #
+# new orb API — state-machine assertions (offscreen, no pixel output checked)
+# --------------------------------------------------------------------------- #
+
+def _make_widget():
+    """Return a ReticleWidget under an offscreen QApplication, or skip."""
+    if reticle.HEADLESS:
+        pytest.skip("PyQt6 absent; widget path unavailable headless")
+    try:
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+        w = reticle.ReticleWidget()
+        return app, w
+    except Exception as e:
+        pytest.skip(f"Qt widget construction unavailable: {e}")
+
+
+def test_set_phase_updates_state():
+    app, w = _make_widget()
+    for ph in ("idle", "listening", "heard", "understanding", "planning", "acting", "done", "error"):
+        w.set_phase(ph)
+        assert w._orb_phase == ph, f"set_phase({ph!r}) did not store phase"
+    del app
+
+
+def test_set_phase_done_fires_ripple():
+    app, w = _make_widget()
+    w.set_phase("idle")
+    assert w._ripple_t is None
+    w.set_phase("done")
+    # Ripple initialised to 0.0 on entry into done from a different phase.
+    assert w._ripple_t is not None
+    assert w._ripple_t == pytest.approx(0.0)
+    del app
+
+
+def test_set_phase_done_repeated_no_restart():
+    """Calling set_phase('done') a second time must not reset a running ripple."""
+    app, w = _make_widget()
+    w.set_phase("done")
+    w._ripple_t = 0.5  # simulate in-progress ripple
+    w.set_phase("done")
+    # already in 'done' → no restart
+    assert w._ripple_t == pytest.approx(0.5)
+    del app
+
+
+def test_set_phase_error_sets_flash():
+    app, w = _make_widget()
+    w.set_phase("idle")
+    w.set_phase("error")
+    assert w._error_flash_count == 4
+    del app
+
+
+def test_set_level_stores_smoothed():
+    app, w = _make_widget()
+    w._amplitude = 0.0
+    w.set_level(1.0)
+    # After one update the amplitude should be strictly > 0 and <= 1.
+    assert 0.0 < w._amplitude <= 1.0
+    del app
+
+
+def test_set_level_clamps_to_unit():
+    app, w = _make_widget()
+    w.set_level(2.5)  # out-of-range value
+    assert w._amplitude <= 1.0
+    w.set_level(-1.0)
+    # amplitude cannot go negative (clamp keeps it ≥ 0)
+    assert w._amplitude >= 0.0
+    del app
+
+
+def test_set_lock_phase_stores_clamped():
+    app, w = _make_widget()
+    w.set_lock_phase(0.7)
+    assert w._lock == pytest.approx(0.7)
+    w.set_lock_phase(1.5)   # clamp to 1.0
+    assert w._lock == pytest.approx(1.0)
+    w.set_lock_phase(-0.3)  # clamp to 0.0
+    assert w._lock == pytest.approx(0.0)
+    del app
+
+
+def test_set_confirm_progress_stores_clamped():
+    app, w = _make_widget()
+    w.set_confirm_progress(0.5)
+    assert w._confirm == pytest.approx(0.5)
+    w.set_confirm_progress(2.0)
+    assert w._confirm == pytest.approx(1.0)
+    w.set_confirm_progress(-1.0)
+    assert w._confirm == pytest.approx(0.0)
+    del app
+
+
+def test_show_ghost_and_move_and_drop():
+    app, w = _make_widget()
+    w.show_ghost((100, 200, 80, 40))
+    assert w._ghost is not None
+    gx, gy, gw, gh = w._ghost
+    assert (gx, gy, gw, gh) == pytest.approx((100.0, 200.0, 80.0, 40.0))
+
+    w.move_ghost(150, 250)
+    gx2, gy2, gw2, gh2 = w._ghost
+    assert (gx2, gy2) == pytest.approx((150.0, 250.0))
+    # width/height preserved
+    assert (gw2, gh2) == pytest.approx((gw, gh))
+
+    w.drop_ghost()
+    assert w._ghost is None
+    del app
+
+
+def test_show_chain_progress_accumulates():
+    app, w = _make_widget()
+    assert w._chain == []
+    w.show_chain_progress("url_open", False)
+    w.show_chain_progress("ax_press", True)
+    assert len(w._chain) == 2
+    assert w._chain[0] == ("url_open", False)
+    assert w._chain[1] == ("ax_press", True)
+    del app
+
+
+def test_reset_chain_clears():
+    app, w = _make_widget()
+    w.show_chain_progress("mcp_tool", True)
+    w.reset_chain()
+    assert w._chain == []
+    del app
+
+
+def test_ripple_auto_fades_via_tick():
+    """Simulating elapsed time past the ripple duration should clear _ripple_t."""
+    app, w = _make_widget()
+    w.set_phase("done")
+    assert w._ripple_t is not None
+    # Wind the start back past the 420ms duration so the next _tick clears it.
+    w._ripple_start = w._ripple_start - 1.0   # 1 second ago → well past 420ms
+    # Normally _tick is driven by QTimer; call it directly to simulate a frame.
+    w._mode = "reticle"  # must be active for _tick to run
+    w._point = (100.0, 100.0)
+    w._place(0.0, 0.0, 200.0, 200.0)
+    # Stop the live timer (we're calling _tick manually)
+    w._timer.stop()
+    w._tick()
+    assert w._ripple_t is None, "ripple should have auto-faded after duration elapsed"
+    del app

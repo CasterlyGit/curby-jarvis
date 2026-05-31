@@ -24,9 +24,27 @@ class _FakeSignal:
         fn()
 
 
+class _NoopSignal:
+    """Stand-in for a typed pyqtSignal: records emits, ignores connects."""
+
+    def __init__(self):
+        self.calls = []
+
+    def emit(self, *a):
+        self.calls.append(a)
+
+    def connect(self, *a, **k):
+        pass
+
+
 class _FakeBridge:
     def __init__(self):
         self.invoke = _FakeSignal()
+        # The revamp HUD signals — no-op recorders so dispatch/phase code runs headless.
+        for name in ("phase", "phase_meta", "partial", "level", "gesture",
+                     "confirm_progress", "chain", "lock", "ghost_show",
+                     "ghost_move", "ghost_drop", "reticle", "risk", "utterance", "hide_all"):
+            setattr(self, name, _NoopSignal())
 
 
 class _FakeCard:
@@ -135,45 +153,79 @@ def test_poll_pointer_hides_when_no_sample():
 
 # ---- voice → dispatch -------------------------------------------------------
 
-def test_dispatch_routes_through_handle_with_confirm_gate():
+def test_dispatch_routes_through_router_with_confirm_gate():
+    """New barge-in dispatch: resolve → router.run with the live confirm gate AND
+    the in-flight cancellation token threaded through."""
+    from curby_jarvis.app import CancellationToken
+
     j = CurbyJarvis()
+    j._bridge = _FakeBridge()
+    j.session = lambda: None  # skip the real SQLite store in this unit test
     seen = {}
 
-    def fake_handle(text, confirm=None):
-        seen["text"] = text
-        seen["confirm"] = confirm
-        return ConnectorResult(ok=True, mechanism="media_key")
+    class _FakeRouter:
+        def run(self, intent, confirm=None, on_chain=None, on_event=None, cancel_token=None):
+            seen["confirm"] = confirm
+            seen["intent"] = intent
+            seen["cancel"] = cancel_token
+            return ConnectorResult(ok=True, mechanism="media_key")
 
-    j.handle = fake_handle
-    j._dispatch_utterance("mute")
-    assert seen["text"] == "mute"
+    j.build_router = lambda: _FakeRouter()
+    j._resolve_live = lambda text: Intent(verb="mute", raw_utterance=text)
+
+    tok = CancellationToken()
+    j._dispatch_utterance("mute", tok)
+    assert seen["intent"].verb == "mute"
     assert seen["confirm"] == j._overlay_confirm  # live gate is wired in
+    assert seen["cancel"] is tok                   # barge-in token threaded through
 
 
 def test_dispatch_swallows_handler_exceptions():
-    j = CurbyJarvis()
+    from curby_jarvis.app import CancellationToken
 
-    def boom(text, confirm=None):
+    j = CurbyJarvis()
+    j._bridge = _FakeBridge()
+    j.session = lambda: None
+
+    def boom(text):
         raise RuntimeError("kaboom")
 
-    j.handle = boom
-    j._dispatch_utterance("anything")  # must not raise — listener stays alive
+    j._resolve_live = boom
+    j._dispatch_utterance("anything", CancellationToken())  # must not raise — listener stays alive
 
 
 def test_on_voice_utterance_spawns_dispatch():
     j = CurbyJarvis()
+    j._bridge = _FakeBridge()
     done = threading.Event()
     got = {}
-    j._dispatch_utterance = lambda text: (got.__setitem__("text", text), done.set())
+    j._dispatch_utterance = lambda text, token: (got.__setitem__("text", text), done.set())
     j._on_voice_utterance("open spotify")
     assert done.wait(timeout=2.0)
     assert got["text"] == "open spotify"
 
 
+def test_spawn_dispatch_cancels_previous_inflight():
+    """A new utterance must cancel the prior in-flight token (INF-12 barge-in)."""
+    j = CurbyJarvis()
+    j._bridge = _FakeBridge()
+    started = threading.Event()
+    j._dispatch_utterance = lambda text, token: started.set()
+    j._spawn_dispatch("first")
+    assert started.wait(timeout=2.0)
+    first_token = j._cancel
+    started.clear()
+    j._spawn_dispatch("second")
+    assert started.wait(timeout=2.0)
+    assert first_token.cancelled()       # the first was cancelled when the second arrived
+    assert j._cancel is not first_token   # a fresh token owns the new utterance
+
+
 def test_on_voice_utterance_ignores_empty():
     j = CurbyJarvis()
+    j._bridge = _FakeBridge()
     n = {"calls": 0}
-    j._dispatch_utterance = lambda t: n.__setitem__("calls", n["calls"] + 1)
+    j._dispatch_utterance = lambda t, tok: n.__setitem__("calls", n["calls"] + 1)
     j._on_voice_utterance("   ")
     assert n["calls"] == 0
 

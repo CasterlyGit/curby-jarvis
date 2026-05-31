@@ -96,3 +96,26 @@ def lower(utterance: str) -> Optional[Intent]:
         if m:
             return builder(m)
     return None
+
+
+def fast_match(partial: str) -> bool:
+    """Return True if *partial* matches a high-confidence, non-deictic rule.
+
+    Used as the ``fast_endpoint_check`` hook in VoiceListener so that a
+    clean command ('pause', 'next tab') triggers immediate finalization
+    without waiting for the full silence window.
+
+    Conditions for True:
+    - ``lower(partial)`` returns a non-None Intent, AND
+    - that Intent has ``confidence >= 0.9``, AND
+    - ``needs_pointer`` is False (deictic commands need the pointer resolved
+      before they can execute — don't rush those).
+    """
+    intent = lower(partial)
+    if intent is None:
+        return False
+    if intent.needs_pointer:
+        return False
+    if intent.confidence < 0.9:
+        return False
+    return True

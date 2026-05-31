@@ -1,14 +1,16 @@
 """PointerStream — background consumer of the hand-signal pointer websocket.
 
-The hand-signal daemon broadcasts on ws://127.0.0.1:8765. Two frame shapes share
+The hand-signal daemon broadcasts on ws://127.0.0.1:8765. Three frame shapes share
 that socket:
 
-    legacy gesture (byte-identical, ignored here):
+    legacy gesture (byte-identical, passed to GestureBus):
         {"gesture":"tick","ts":...}
     pointer v2 (what we want):
         {"t":"pointer","v":2,"ts":...,"present":true,"x":0.62,"y":0.41,
          "conf":0.94,"aim_ok":true,"mirrored":true,"src_w":640,"src_h":480,
          "landmark":8}
+    gesture v2 (NEW — named pose with confidence):
+        {"t":"gesture","kind":"pinch","conf":0.92,"ts":...}
     hello v2 (handshake; carries src geometry + mirror flag):
         {"t":"hello","v":2,"src_w":640,"src_h":480,"mirrored":true,...}
 
@@ -36,6 +38,10 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Optional
 
+# GestureBus is imported lazily at point-of-use in PointerStream so the module
+# remains headless even when gesture_bus has not yet been built.  The type hint
+# is quoted so it never triggers an eager import at module load time.
+
 DEFAULT_URL = "ws://127.0.0.1:8765"
 
 # Ring depth: at 30 Hz this is ~1s of history — enough for FusionBinder to pick the
@@ -54,6 +60,12 @@ class PointerSample:
     Coords are ALREADY un-mirrored by the daemon; `mirrored` is informational so
     calibration knows the source convention. Calibration maps (x_norm,y_norm) ->
     logical screen pixels (Qt geometry == AX/CGEvent space).
+
+    gesture_kind: optional pose name carried inline on frames that both track a
+    pointer AND classify a pose (e.g. the daemon might tag "pinch" on the same
+    frame that carries x/y coords). None for pure tracking frames. This field is
+    additive — legacy consumers that only read x_norm/y_norm/aim_ok/etc. are
+    unaffected because all existing fields stay in the same positions.
     """
     x_norm: float
     y_norm: float
@@ -64,6 +76,7 @@ class PointerSample:
     src_w: int
     src_h: int
     mirrored: bool
+    gesture_kind: Optional[str] = None
 
 
 class PointerStream:
@@ -88,6 +101,10 @@ class PointerStream:
         self._src_w = 0
         self._src_h = 0
         self._mirrored = True
+        # GestureBus is created lazily on first access so gesture_bus.py is not
+        # imported at module load time (headless contract).
+        self._gestures: Optional["GestureBus"] = None  # type: ignore[name-defined]
+        self._gesture_lock = threading.Lock()
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -154,6 +171,17 @@ class PointerStream:
         with self._lock:
             return self._mirrored
 
+    @property
+    def gestures(self) -> "GestureBus":  # type: ignore[name-defined]
+        """The GestureBus this stream feeds.  Created lazily on first access so
+        the import of gesture_bus is deferred until something actually uses it.
+        Callers subscribe here to receive edge-triggered gesture events."""
+        with self._gesture_lock:
+            if self._gestures is None:
+                from .gesture_bus import GestureBus  # lazy: headless contract
+                self._gestures = GestureBus()
+            return self._gestures
+
     # -- ingest (also the headless test seam) --------------------------------
 
     def _ingest(self, frame: dict) -> Optional[PointerSample]:
@@ -176,14 +204,31 @@ class PointerStream:
                 self._mirrored = bool(frame.get("mirrored", self._mirrored))
             return None
 
+        if t == "gesture":
+            # New named-pose frame: {"t":"gesture","kind":"pinch","conf":0.92,"ts":...}
+            # Feed the bus (lazy init) and return None — not a PointerSample.
+            kind = frame.get("kind")
+            if kind:
+                try:
+                    conf = float(frame.get("conf", 1.0))
+                    ts = frame.get("ts")
+                    self.gestures.feed(kind, conf=conf, ts=ts)
+                except Exception:
+                    pass  # malformed gesture frame never wedges the consumer
+            return None
+
         if t != "pointer":
-            # Legacy gesture-only frame ({"gesture":...}) or anything unknown.
+            # Legacy gesture-only frame ({"gesture":...,"ts":...}) — byte-identical
+            # passthrough; we silently ignore it here (no sample, no bus feed).
             return None
 
         try:
             src_w = int(frame.get("src_w", 0) or 0)
             src_h = int(frame.get("src_h", 0) or 0)
             mirrored = bool(frame.get("mirrored", True))
+            # gesture_kind is optional inline pose tag; None on pure tracking frames.
+            gesture_kind_raw = frame.get("gesture_kind") or frame.get("pose")
+            gesture_kind = str(gesture_kind_raw) if gesture_kind_raw is not None else None
             sample = PointerSample(
                 x_norm=float(frame["x"]),
                 y_norm=float(frame["y"]),
@@ -194,6 +239,7 @@ class PointerStream:
                 src_w=src_w,
                 src_h=src_h,
                 mirrored=mirrored,
+                gesture_kind=gesture_kind,
             )
         except (KeyError, TypeError, ValueError):
             # A malformed pointer frame must never wedge the consumer.
@@ -298,4 +344,4 @@ def _websockets_available() -> bool:
     return importlib.util.find_spec("websockets") is not None
 
 
-__all__ = ["PointerSample", "PointerStream", "DEFAULT_URL"]
+__all__ = ["PointerSample", "PointerStream", "DEFAULT_URL", "GestureBus"]

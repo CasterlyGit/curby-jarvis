@@ -14,7 +14,7 @@ GD4 next tab             -> browser_tab  / reversible    / no-confirm
 GD5 play this (+pointer) -> deixis_click / (deixis)      / -
 GD6 move that there      -> deixis_click / irreversible* / confirm   (*ambiguous until AX resolves)
 GD7 play this (NO ptr)   -> deixis_click / ambiguous     / confirm
-GD8 long open-ended      -> agent_fallback / ambiguous   / -          (rule miss -> parser None -> agent)
+GD8 long open-ended      -> agent_loop     / ambiguous   / -          (rule miss -> parser None -> agent loop)
 """
 from __future__ import annotations
 
@@ -72,7 +72,10 @@ GOLDEN: list[GoldenDemo] = [
                chosen_connector="deixis_click", verb="play",
                must_confirm=True, risk_in=("ambiguous",)),
     GoldenDemo("GD8", "reorganize my entire downloads folder by file type and date",
-               chosen_connector="agent_fallback", verb="agent_task",
+               # Revamp: the open-ended path now routes to the structured agent_loop
+               # (cost 9) — a Claude tool-use loop over the whole connector palette —
+               # which interposes BEFORE the black-box agent_fallback (cost 10).
+               chosen_connector="agent_loop", verb="agent_task",
                must_confirm=False, risk_in=("ambiguous",)),
 ]
 
@@ -81,7 +84,8 @@ def run_demo(demo: GoldenDemo) -> dict:
     """Run one demo through the real CLI and return its parsed audit dict.
 
     Forces an empty ANTHROPIC_API_KEY so GD8 deterministically takes the
-    rule-miss -> parser-returns-None -> agent_fallback path with no network.
+    rule-miss -> parser-returns-None -> agent path with no network. In --dry-run the
+    intended route (cheapest can_handle, availability ignored) is the agent_loop.
     """
     argv = [sys.executable, _APP, "--say", demo.utterance, "--dry-run"]
     if demo.pointer:

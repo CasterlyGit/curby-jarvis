@@ -207,6 +207,10 @@ class VoiceListener:
         max_utt_s: float = 12.0,
         wake_word: Optional[str] = None,
         on_status: Optional[Callable[[str], None]] = None,
+        # NEW kwargs (additive — all default None so existing callers are unaffected)
+        on_partial: Optional[Callable[[str], None]] = None,
+        on_level: Optional[Callable[[float], None]] = None,
+        fast_endpoint_check: Optional[Callable[[str], bool]] = None,
     ) -> None:
         self._on_utterance = on_utterance
         self._locale = locale
@@ -214,6 +218,20 @@ class VoiceListener:
         self._max_utt_s = float(max_utt_s)
         self._wake_word = wake_word
         self._on_status = on_status
+        # Partial-transcript callback: invoked each time the recognizer updates
+        # its running transcription.  Allows the UI to show live captions and
+        # the fast-endpoint path to trigger on a complete command mid-phrase.
+        self._on_partial = on_partial
+        # RMS amplitude callback (0..1, smoothed, ~30 Hz).  Drives the
+        # listening-reactive scale on the reticle orb.
+        self._on_level = on_level
+        # Optional fast-endpoint predicate: if supplied and it returns True for
+        # the current partial text, finalize immediately without waiting for the
+        # silence window (e.g. rule_table.fast_match).
+        self._fast_endpoint_check = fast_endpoint_check
+        # Smoothed RMS level (exponential moving average, alpha=0.3).
+        self._rms_level: float = 0.0
+        self._rms_last_emit: float = 0.0  # wall-clock of last on_level emit
 
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -350,11 +368,45 @@ class VoiceListener:
                 req.appendAudioPCMBuffer_(buffer)
             except Exception:
                 pass
+        # RMS amplitude tap — compute smoothed level and fire on_level at ~30Hz.
+        # Best-effort: any failure here must not disrupt audio recording.
+        if self._on_level is not None:
+            try:
+                self._emit_rms(buffer)
+            except Exception:
+                pass
+
+    def _emit_rms(self, buffer) -> None:
+        """Compute RMS of buffer, smooth with EMA, emit on_level at ~30 Hz."""
+        import math
+        try:
+            # floatChannelData returns a list of per-channel float arrays.
+            channels = buffer.floatChannelData()
+            frame_count = buffer.frameLength()
+            if not channels or frame_count == 0:
+                return
+            # Use first channel for simplicity (mono input on mic tap).
+            samples = channels[0]
+            sq_sum = sum(samples[i] * samples[i] for i in range(frame_count))
+            rms = math.sqrt(sq_sum / frame_count)
+        except Exception:
+            return
+        # Exponential moving average (alpha=0.3) keeps level from jumping.
+        self._rms_level = 0.7 * self._rms_level + 0.3 * min(rms * 8.0, 1.0)
+        now = time.time()
+        # Throttle to approximately 30 Hz.
+        if now - self._rms_last_emit >= 0.033:
+            self._rms_last_emit = now
+            try:
+                self._on_level(round(self._rms_level, 4))
+            except Exception:
+                pass
 
     # -- recognition result handler (framework queue) ------------------------
 
     def _on_result(self, result, error) -> None:
         now = time.time()
+        partial_to_emit: Optional[str] = None
         with self._lock:
             if self._stop.is_set():
                 return
@@ -370,9 +422,16 @@ class VoiceListener:
                 self._last_change = now
                 if self._utt_start == 0.0:
                     self._utt_start = now
+                partial_to_emit = text
             try:
                 if result.isFinal():
                     self._task_dead = True
+            except Exception:
+                pass
+        # Fire on_partial outside the lock (best-effort, never raise).
+        if partial_to_emit is not None and self._on_partial is not None:
+            try:
+                self._on_partial(partial_to_emit)
             except Exception:
                 pass
 
@@ -401,12 +460,23 @@ class VoiceListener:
             # 3) endpoint the current phrase.
             with self._lock:
                 has_text = bool(self._latest_text)
+                current_text = self._latest_text
                 since_change = (now - self._last_change) if has_text else 0.0
                 since_start = (now - self._utt_start) if self._utt_start else 0.0
                 dead = self._task_dead
 
+            # fast_endpoint_check: short-circuit silence wait when the partial
+            # already contains a complete, high-confidence command.
+            fast_endpoint = False
+            if has_text and self._fast_endpoint_check is not None:
+                try:
+                    fast_endpoint = bool(self._fast_endpoint_check(current_text))
+                except Exception:
+                    pass
+
             if has_text and (
                 dead
+                or fast_endpoint
                 or should_endpoint(
                     has_text, since_change, since_start,
                     silence_s=self._silence_s, max_utt_s=self._max_utt_s,

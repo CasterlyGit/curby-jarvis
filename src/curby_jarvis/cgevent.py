@@ -191,6 +191,66 @@ def key(combo: str) -> bool:
         return False
 
 
+def type_text(text: str) -> bool:
+    """Type a string by generating CGEventKeyboardSetUnicodeString events.
+
+    Each Unicode scalar is sent as a key-down/key-up pair with virtual keycode 0
+    and the Unicode payload written via CGEventKeyboardSetUnicodeString.  This
+    avoids looking up every character in _KEYCODES and handles arbitrary Unicode
+    (emoji, non-ASCII).  Returns False if Secure Input is active or the text is
+    empty or the Quartz bridge is unavailable.
+
+    WHY CGEventKeyboardSetUnicodeString vs a paste shortcut: the paste route
+    requires clipboard ownership which would clobber the user's clipboard.  The
+    per-character keyboard route lands the text at the cursor regardless of app.
+    """
+    if not text or secure_input_active():
+        return False
+    try:
+        from Quartz import (
+            CGEventCreateKeyboardEvent,
+            CGEventKeyboardSetUnicodeString,
+        )
+        for ch in text:
+            down = CGEventCreateKeyboardEvent(None, 0, True)
+            up = CGEventCreateKeyboardEvent(None, 0, False)
+            CGEventKeyboardSetUnicodeString(down, len(ch), ch)
+            CGEventKeyboardSetUnicodeString(up, len(ch), ch)
+            _post(down)
+            _post(up)
+        return True
+    except Exception:
+        return False
+
+
+def scroll(dx: float, dy: float) -> bool:
+    """Synthesize a scroll-wheel event with horizontal (dx) and vertical (dy) ticks.
+
+    Positive dy scrolls DOWN (matches most app conventions); positive dx scrolls
+    RIGHT.  Units are discrete scroll 'lines'.  Returns False if Secure Input is
+    active or the Quartz bridge is unavailable.
+
+    WHY not CGEventCreateScrollWheelEvent2: the simpler kCGScrollEventUnitLine
+    path works for the macro-control use-case here; pixel-precise scrolling for
+    smooth animations would need the separate axis API.
+    """
+    if secure_input_active():
+        return False
+    try:
+        from Quartz import (
+            CGEventCreateScrollWheelEvent,
+            kCGScrollEventUnitLine,
+        )
+        # CGEventCreateScrollWheelEvent(source, unit, wheelCount, wheel1[, wheel2])
+        # wheel1 = vertical axis (positive=down on most systems), wheel2 = horizontal
+        ev = CGEventCreateScrollWheelEvent(None, kCGScrollEventUnitLine, 2,
+                                           int(dy), int(dx))
+        _post(ev)
+        return True
+    except Exception:
+        return False
+
+
 def media_key(name: str) -> bool:
     """Tap a media-transport key in {play,next,prev,mute,sound_up,sound_down}.
 
@@ -230,4 +290,4 @@ def media_key(name: str) -> bool:
         return False
 
 
-__all__ = ["click", "double_click", "drag", "key", "media_key"]
+__all__ = ["click", "double_click", "drag", "key", "media_key", "type_text", "scroll"]
