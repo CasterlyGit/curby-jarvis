@@ -102,7 +102,9 @@ class CurbyJarvis:
         self._card = None            # PreviewCardWidget — lazy
         self._caption = None         # CaptionWidget — lazy (UI-03)
         self._edge = None            # EdgeLightWidget — lazy (UI-08)
+        self._presence = None        # PresenceLayer — lazy (always-on ambient)
         self._history = None         # HistoryWidget — lazy (UI-11)
+        self._cmd_input = None       # CommandInputWidget — lazy (UI-15, text mode)
         self._audio = None           # AudioFeedbackPlayer — lazy (INF-10/UI-13)
         self._phase_audio = None     # PhaseAudio — lazy
         self._voice = None           # stt.VoiceListener — lazy (live mode only)
@@ -350,9 +352,15 @@ class CurbyJarvis:
 
     # -- live mode (lazy Qt; voice in + gesture reticle + confirm gate) -------
 
-    def run_live(self) -> int:
+    def run_live(self, text_input: bool = False) -> int:
         """Bring up the full controller: Qt overlays, gesture stream → reticle,
         on-device voice → route → confirm → execute.
+
+        When `text_input` is True, the mic/Speech path is skipped entirely and
+        commands are read from stdin instead — the full HUD + routing pipeline run
+        identically, just driven by typed lines through `_on_voice_utterance`. This
+        is the supported way to exercise the controller on a machine where the
+        Speech-Recognition grant isn't available.
 
         This is the only path that touches Qt and the microphone, all lazily. The
         microphone listener is best-effort: if Speech access is denied or the
@@ -389,9 +397,13 @@ class CurbyJarvis:
             pass
         stream.start()
         self._start_reticle_driver()
-        self._start_stt()
+        if text_input:
+            self._start_text_input()
+        else:
+            self._start_stt()
 
-        print("[curby-jarvis] live. Overlays up; routing voice → connectors. "
+        src = "stdin (type a command + Enter)" if text_input else "voice"
+        print(f"[curby-jarvis] live. Overlays up; routing {src} → connectors. "
               "Ctrl-C to quit.", file=sys.stderr)
         try:
             return int(self._app.exec())
@@ -455,6 +467,13 @@ class CurbyJarvis:
                 self._history = HistoryWidget(on_undo=self._undo_action)
             except Exception:
                 self._history = None
+        if self._presence is None:
+            try:
+                from .presence import PresenceLayer
+                self._presence = PresenceLayer()
+                self._presence.start()
+            except Exception:
+                self._presence = None
 
         # -- audio channel (INF-10 / UI-13) -----------------------------------
         if self._phase_audio is None:
@@ -486,6 +505,8 @@ class CurbyJarvis:
             b.ghost_drop.connect(self._reticle.drop_ghost)
         b.gesture.connect(self._on_gesture)
         b.hide_all.connect(self._dismiss_all)
+        if self._presence is not None:
+            b.phase.connect(self._presence.set_phase)
 
     # -- phase fan-out (UI-01) ------------------------------------------------
 
@@ -503,6 +524,9 @@ class CurbyJarvis:
             except Exception: pass
         if self._phase_audio is not None:
             try: self._phase_audio.on_phase(p)
+            except Exception: pass
+        if self._presence is not None:
+            try: self._presence.set_phase(p)
             except Exception: pass
 
     def _apply_phase_meta(self, meta) -> None:
@@ -670,6 +694,61 @@ class CurbyJarvis:
 
     # -- voice → route → confirm → execute ------------------------------------
 
+    def _start_text_input(self) -> None:
+        """Drive the live pipeline from typed stdin lines instead of the mic.
+
+        Each line is fed into `_on_voice_utterance` — the identical entry point the
+        voice listener uses — so routing, the confirm gate, barge-in, the HUD phase
+        machine and execution behave exactly as they would for a spoken phrase. Runs
+        on a daemon reader thread so the Qt loop stays responsive; a blank line is
+        ignored, EOF (Ctrl-D) leaves the overlays up. No Speech/mic API is touched.
+        """
+        self._bridge.phase.emit("listening")
+        print("[curby-jarvis] text mode: type a command and press Enter "
+              "(e.g. 'open Spotify', 'mute', 'what time is it'). Ctrl-C to quit.",
+              file=sys.stderr)
+
+        # On-screen input pane (UI-15): the typed-command equivalent of the mic.
+        # Built on the Qt main thread (widget construction is not thread-safe);
+        # submissions go through the same _on_voice_utterance entry as stdin/voice.
+        # Best-effort: if Qt/display is unavailable the stdin reader below still
+        # drives the controller, so a pane failure must not take down text mode.
+        def _mount_pane():
+            try:
+                from .overlay.command_input import CommandInputWidget
+                if self._cmd_input is None:
+                    self._cmd_input = CommandInputWidget(
+                        on_submit=self._on_voice_utterance)
+                self._cmd_input.show_pane()
+            except Exception as e:
+                print(f"[curby-jarvis] on-screen input pane unavailable "
+                      f"({e!r}); type commands in this terminal instead.",
+                      file=sys.stderr)
+        try:
+            self._bridge.invoke.emit(_mount_pane)
+        except Exception:
+            pass
+
+        def _reader():
+            while True:
+                try:
+                    line = sys.stdin.readline()
+                except Exception:
+                    break
+                if line == "":          # EOF — stop reading, keep HUD alive
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    self._on_voice_utterance(line)
+                except Exception as e:  # a bad line must never kill the reader
+                    print(f"[curby-jarvis] dispatch error: {e!r}", file=sys.stderr)
+
+        import threading
+        threading.Thread(target=_reader, name="curby-text-input",
+                         daemon=True).start()
+
     def _start_stt(self) -> None:
         """Start the on-device voice listener; route each finished phrase."""
         try:
@@ -820,8 +899,12 @@ class CurbyJarvis:
         tag = "ok" if res.ok else (res.error or "no-op")
         print(f"[curby-jarvis] {tag} ({res.mechanism}) {latency['total_ms']}ms", file=sys.stderr)
         if res.ok:
-            self._emit_phase("done", text=(res.detail_text or "done"),
+            _done_text = res.detail_text or "done"
+            self._emit_phase("done", text=_done_text,
                              mechanism=res.mechanism, latency=latency)
+            if self._presence is not None:
+                try: self._presence.set_last_action(_done_text)
+                except Exception: pass
             self._speak(res.detail_text)
         else:
             self._emit_phase("error", text=(res.error or "no-op"), mechanism=res.mechanism)
@@ -1075,6 +1158,16 @@ def build_arg_parser():
                    help="enable Tier-2 vision labeling on an AX miss (needs key + capture)")
     p.add_argument("--live", action="store_true",
                    help="run the full controller: voice in + gesture reticle + confirm")
+    p.add_argument("--text", action="store_true",
+                   help="run the full live HUD but take commands typed on stdin "
+                        "instead of the mic (no Speech-Recognition grant needed)")
+    p.add_argument("--no-voice", action="store_true",
+                   help="alias for --text: full HUD + routing with ZERO mic/Speech use; "
+                        "commands typed on stdin. AVAudioEngine and SFSpeechRecognizer are "
+                        "never imported or started.")
+    p.add_argument("--demo", action="store_true",
+                   help="headless demo mode: implies --no-voice; skips gesture websocket. "
+                        "Pipe utterances via stdin or use --say for one-shots.")
     p.add_argument("--check", action="store_true",
                    help="preflight: probe + request mic/Speech/Accessibility, report status")
     return p
@@ -1222,8 +1315,14 @@ def main(argv: Optional[list] = None) -> int:
 
     jarvis = CurbyJarvis(vision=bool(args.vision))
 
-    if args.live:
-        return jarvis.run_live()
+    # --demo: standalone ambient-presence visual showcase (no mic, no key needed).
+    if args.demo:
+        try:
+            from .presence import run_demo
+            return run_demo()
+        except Exception as e:
+            print(f"[curby-jarvis] demo failed: {e}", file=sys.stderr)
+            return 2
 
     if args.say is not None:
         if args.dry_run:
@@ -1236,6 +1335,11 @@ def main(argv: Optional[list] = None) -> int:
         print(json.dumps({"ok": res.ok, "mechanism": res.mechanism,
                           "error": res.error, "detail": res.detail}))
         return 0 if res.ok else 1
+
+    # --no-voice and --text are voiceless stdin-driven live modes.
+    voiceless = bool(args.text) or bool(args.no_voice)
+    if args.live or args.text or args.no_voice:
+        return jarvis.run_live(text_input=voiceless)
 
     build_arg_parser().print_help()
     return 0

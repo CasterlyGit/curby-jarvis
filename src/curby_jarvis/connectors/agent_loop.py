@@ -86,9 +86,15 @@ class AgentLoopConnector(Connector):
         # Requires a dispatch function (injected by P2).
         if self._dispatch is None:
             return False
-        # Requires an API key OR a custom client_factory (for tests).
+        # Requires an API key, a custom client_factory (for tests), or the
+        # local claude CLI binary (CURBY_BACKEND=cli or no key + claude on PATH).
         if self._client_factory is None and not os.environ.get("ANTHROPIC_API_KEY"):
-            return False
+            try:
+                from ..claude_cli import backend_is_cli  # lazy — never at top level
+                if not backend_is_cli():
+                    return False
+            except Exception:
+                return False
         # Breaker open → unavailable.
         if not self.breaker_allows():
             return False
@@ -280,11 +286,16 @@ class AgentLoopConnector(Connector):
     # -- helpers ----------------------------------------------------------------
 
     def _get_client(self):
-        """Return the Anthropic client, building it lazily if needed."""
+        """Return the Anthropic client (or CLI shim), building it lazily if needed."""
         if self._client is not None:
             return self._client
         if self._client_factory is not None:
             self._client = self._client_factory()
+        elif not os.environ.get("ANTHROPIC_API_KEY"):
+            # No API key — fall back to the local claude CLI client shim.
+            # This is the zero-key path: relies on `claude auth` session.
+            from ..claude_cli import ClaudeCliClient  # noqa: PLC0415
+            self._client = ClaudeCliClient()
         else:
             # Lazy import: never at module level.
             import anthropic  # noqa: PLC0415

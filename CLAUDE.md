@@ -4,7 +4,7 @@
 
 Voice + hand-gesture universal macOS controller — point at a target, say what to do, it routes to the cheapest capable connector and does it.
 
-**Status:** v2.0.0 "JARVIS revamp" — branch `revamp/jarvis-v2` (off main, unmerged). 742 tests green, 4 skipped. 49 modules, ~11,500 src LOC.
+**Status:** v2.0.0 "JARVIS revamp" — branch `revamp/jarvis-v2` (off main, unmerged). 845 tests green, 8 skipped. 51 modules, ~12,500 src LOC. Claude-CLI backend + voiceless run + ambient presence overlay all shipped this session.
 
 ---
 
@@ -20,6 +20,18 @@ python -m curby_jarvis.app --live           # on-device voice controller (stream
 python -m curby_jarvis.app --say "open Spotify"                          # route + execute
 python -m curby_jarvis.app --say "open Spotify" --dry-run                # audit JSON, zero side effects
 python -m curby_jarvis.app --say "move that there" --pointer 100,200 --pointer2 800,600 --dry-run
+
+# Claude-CLI backend (no API key required — uses local `claude` binary)
+CURBY_BACKEND=cli python -m curby_jarvis.app --check           # verify CLI backend shows in agent line
+CURBY_BACKEND=cli QT_QPA_PLATFORM=offscreen \
+    python -m curby_jarvis.app --say "what time is it"         # one-shot via CLI, no mic
+
+# Voiceless / text-input live mode
+python -m curby_jarvis.app --no-voice                          # full HUD, type commands on stdin
+python -m curby_jarvis.app --text                              # alias for --no-voice
+
+# Ambient JARVIS presence demo (no mic, no API key, launches on screen)
+CURBY_BACKEND=cli python -m curby_jarvis.app --demo
 ```
 
 Venv: `.venv/`. Python 3.11+. Optional vision extra: `pip install -e ".[vision]"` for `computer_use`.
@@ -92,7 +104,14 @@ Gesture event bus with hysteresis + cooldown over the hand-signal pointer stream
 
 ```
 src/curby_jarvis/
-├── app.py                  CLI entrypoint + --live controller + --check preflight
+├── app.py                  CLI entrypoint + --live/--no-voice/--demo/--check
+├── claude_cli.py           Claude-CLI backend shim (no API key path): ClaudeCliClient,
+│                           ClaudeCliIntentClient, complete_intent(), plan_agent_steps(),
+│                           backend_is_cli(), cli_available(). CURBY_BACKEND=cli forces it.
+├── presence.py             Always-on ambient JARVIS presence overlay: AmbientOrbWidget
+│                           (arc-reactor orb, breathe/spin/ripple/flash), AmbientEdgeWidget
+│                           (full-screen vignette), StatusGlyphWidget (frosted console pill),
+│                           PresenceLayer facade, run_demo() for standalone launch.
 ├── router.py               Hybrid CapabilityRouter (cost, -confidence) chain
 ├── rule_table.py           golden lowering: utterance → verb/intent
 ├── intent.py               Intent model, PreviewCard, ConnectorResult, LLM parse seam
@@ -133,7 +152,12 @@ src/curby_jarvis/
 
 ## 5. Current state / next
 
-- v2.0.0 built + 742 tests green + adversarial review (21 findings, all fixed) on `revamp/jarvis-v2`.
+- v2.0.0 built + 845 tests green (8 skipped) + adversarial review (21 findings, all fixed) on `revamp/jarvis-v2`.
+- Claude-CLI backend shipped: no API key needed, `CURBY_BACKEND=cli` or auto-detected.
+- Voiceless run mode shipped: `--no-voice` / `--text` flags, full HUD + routing, stdin commands.
+- Ambient presence overlay shipped: `presence.py` — arc-reactor orb, screen vignette, phase glyph.
+- STT false-negative fix shipped: `not-determined` TCC status proceeds optimistically.
+- `--say` + `--no-voice` combo fixed (arg ordering bug in `main()`).
 - Not yet merged to main, not tagged, not pushed to remote.
 - Commits: `6cf5987` (v1.0.0 baseline) → `88f80bc` (P0 foundations) → `d995c07` (P2 integration) → `fde75ae` (P3: 21 fixes).
 

@@ -125,11 +125,15 @@ def test_is_available_false_when_no_dispatch(monkeypatch):
     assert conn.is_available(Intent("agent_task")) is False
 
 
-def test_is_available_false_when_no_key_and_no_factory(monkeypatch):
+def test_is_available_false_when_no_key_and_no_factory_and_no_cli(monkeypatch):
+    """is_available() is False when no API key, no client_factory, and no CLI backend."""
+    from unittest.mock import patch
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CURBY_BACKEND", raising=False)
     dispatch = FakeDispatch()
     conn = AgentLoopConnector(dispatch=dispatch, client_factory=None)
-    assert conn.is_available(Intent("agent_task")) is False
+    with patch("curby_jarvis.claude_cli.backend_is_cli", return_value=False):
+        assert conn.is_available(Intent("agent_task")) is False
 
 
 def test_is_available_true_with_dispatch_and_factory(monkeypatch):

@@ -222,17 +222,26 @@ class IntentParser:
         if self._client is not None:
             return self._client
         key = _resolve_api_key()
-        if not key:
-            return None
+        if key:
+            # API key present — use the real Anthropic SDK.
+            try:
+                import anthropic  # lazy: keeps the module headless-importable
+            except Exception:
+                return None
+            try:
+                self._client = anthropic.Anthropic(api_key=key)
+            except Exception:
+                self._client = None
+            return self._client
+        # No API key — try the local claude CLI shim (zero-key path).
         try:
-            import anthropic  # lazy: keeps the module headless-importable
+            from ..claude_cli import ClaudeCliIntentClient, backend_is_cli  # lazy
+            if backend_is_cli():
+                self._client = ClaudeCliIntentClient()
+                return self._client
         except Exception:
-            return None
-        try:
-            self._client = anthropic.Anthropic(api_key=key)
-        except Exception:
-            self._client = None
-        return self._client
+            pass
+        return None
 
     # -- parse -----------------------------------------------------------------
 

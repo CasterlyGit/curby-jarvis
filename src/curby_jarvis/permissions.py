@@ -89,19 +89,35 @@ def probe_agent() -> Dict[str, Any]:
     """Check Claude CLI and API key availability.
 
     Returns a dict with:
-        ``claude_cli``  — str path to the claude binary, or empty string.
-        ``api_key``     — bool, True if ``ANTHROPIC_API_KEY`` is non-empty.
+        ``claude_cli``    — str path to the claude binary, or empty string.
+        ``api_key``       — bool, True if ``ANTHROPIC_API_KEY`` is non-empty.
+        ``cli_backend``   — bool, True if the local CLI is available as a
+                            backend (CURBY_BACKEND=cli, or no key + claude on PATH).
+        ``agent_usable``  — bool, True when ANY backend is usable (api_key OR
+                            cli_backend). Used by ``--check`` to report readiness.
     """
     import shutil  # stdlib — always available
-    cli_path = os.environ.get("CLAUDE_CLI") or ""
-    if not cli_path:
+    cli_path_val = os.environ.get("CLAUDE_CLI") or ""
+    if not cli_path_val:
         try:
             found = shutil.which("claude")
-            cli_path = found or ""
+            cli_path_val = found or ""
         except Exception:
-            cli_path = ""
+            cli_path_val = ""
     api_key = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
-    return {"claude_cli": cli_path, "api_key": api_key}
+    # Probe CLI backend availability via the dedicated helper (lazy import).
+    cli_backend = False
+    try:
+        from .claude_cli import backend_is_cli  # lazy — never at top level
+        cli_backend = backend_is_cli()
+    except Exception:
+        cli_backend = bool(cli_path_val)  # degrade: available if binary found
+    return {
+        "claude_cli": cli_path_val,
+        "api_key": api_key,
+        "cli_backend": cli_backend,
+        "agent_usable": api_key or cli_backend,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -202,11 +218,14 @@ def full_report() -> Dict[str, Any]:
     except Exception:
         report["agent"] = {"claude_cli": "", "api_key": False}
 
-    # all_green: every tier is usable
+    # all_green: every tier is usable.
+    # Agent tier is green when EITHER an API key is set OR the local claude CLI
+    # is available as a backend (CURBY_BACKEND=cli or no key + claude on PATH).
     ax_ok = bool(report["accessibility"])
     auto_ok = report["automation"] == "authorized"
     screen_ok = bool(report["screen_recording"])
-    agent_ok = bool((report["agent"] or {}).get("api_key", False))
+    agent_data = report["agent"] or {}
+    agent_ok = bool(agent_data.get("agent_usable", agent_data.get("api_key", False)))
 
     report["all_green"] = ax_ok and auto_ok and screen_ok and agent_ok
     return report

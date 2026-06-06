@@ -140,6 +140,22 @@ def authorization_summary() -> dict:
     }
 
 
+def _can_prompt_speech() -> bool:
+    """True only if this process can safely call SFSpeechRecognizer
+    requestAuthorization_ — i.e. its bundle declares
+    NSSpeechRecognitionUsageDescription. macOS aborts the process otherwise, so
+    a bare CLI invocation (no .app bundle) returns False and callers fall back to
+    a non-prompting status read. Pure read of the running bundle's Info.plist."""
+    try:
+        from Foundation import NSBundle
+        info = NSBundle.mainBundle().infoDictionary()
+        if not info:
+            return False
+        return bool(info.get("NSSpeechRecognitionUsageDescription"))
+    except Exception:
+        return False
+
+
 def request_authorizations(timeout: float = 25.0, pump_runloop: bool = True) -> dict:
     """Prompt for Speech + Microphone access (no-op if already decided) and wait
     for the user's answer. Pumps the main runloop while waiting so the async
@@ -150,6 +166,17 @@ def request_authorizations(timeout: float = 25.0, pump_runloop: bool = True) -> 
         import AVFoundation
     except Exception as e:
         return {"error": f"Speech framework unavailable: {e!r}"}
+
+    # macOS HARD-ABORTS (SIGABRT) any process that calls requestAuthorization_
+    # without NSSpeechRecognitionUsageDescription declared in its Info.plist.
+    # A bare `python -m curby_jarvis` invocation has no such bundle, so calling
+    # the request would kill the process before the HUD ever draws. Detect the
+    # missing usage string up front and SKIP the prompting call — fall back to a
+    # pure status read (authorizationStatus(), which never aborts). When run from
+    # a signed .app bundle that declares the key, _can_prompt_speech() is True and
+    # we prompt as normal.
+    if not _can_prompt_speech():
+        return authorization_summary()
 
     done = threading.Event()
     state = {"speech": None, "mic": None}
@@ -297,14 +324,39 @@ class VoiceListener:
                 "Privacy & Security › Speech Recognition, then relaunch."
             )
             return False
-        if summary.get("speech") == "not-determined" or summary.get("mic") == "not-determined":
-            # Fire the prompts now; the watcher will retry engine start until the
-            # user answers, so a first-run grant lights up mid-session.
-            Speech.SFSpeechRecognizer.requestAuthorization_(lambda *_: None)
-            AVFoundation.AVCaptureDevice.requestAccessForMediaType_completionHandler_(
-                AVFoundation.AVMediaTypeAudio, lambda *_: None
+        # Microphone hard-denied (distinct from speech-recognition denial).
+        if summary.get("mic") in ("denied", "restricted"):
+            self._status(
+                "Microphone access is denied — enable it in System Settings › "
+                "Privacy & Security › Microphone, then relaunch."
             )
-            self._status("Requesting Microphone + Speech Recognition permission…")
+            return False
+        if summary.get("speech") == "not-determined" or summary.get("mic") == "not-determined":
+            if _can_prompt_speech():
+                # Fire the prompts now; the watcher will retry engine start until
+                # the user answers, so a first-run grant lights up mid-session.
+                Speech.SFSpeechRecognizer.requestAuthorization_(lambda *_: None)
+                AVFoundation.AVCaptureDevice.requestAccessForMediaType_completionHandler_(
+                    AVFoundation.AVMediaTypeAudio, lambda *_: None
+                )
+                self._status("Requesting Microphone + Speech Recognition permission…")
+            else:
+                # Bare CLI process (no Info.plist bundle): the OS cannot show the
+                # Speech Recognition prompt (SIGABRT if we try), so we skip it.
+                # TCC "not-determined" for a CLI binary does NOT mean denied — it
+                # means no bundle-level entry yet.  The user may have already
+                # granted Speech Recognition to this terminal/Python binary via
+                # System Settings; if so, the engine start below will succeed.
+                # We proceed optimistically (attempt the engine) and only bail if
+                # the engine itself fails — giving a clear actionable message then.
+                # This prevents the false-negative where a pre-granted permission
+                # is mis-reported as "unavailable."
+                self._status(
+                    "Speech authorization status is 'not-determined' for this CLI "
+                    "binary — attempting to start voice engine anyway. If it fails, "
+                    "grant Speech Recognition in System Settings › Privacy & Security "
+                    "› Speech Recognition for this terminal, then relaunch."
+                )
 
         loc = NSLocale.localeWithLocaleIdentifier_(self._locale)
         rec = Speech.SFSpeechRecognizer.alloc().initWithLocale_(loc)
