@@ -9,6 +9,10 @@ intent UNCHANGED — pointer stays None, so Intent.risk collapses to 'ambiguous'
 and the overlay forces a 'point and confirm'. We NEVER synthesize a coordinate;
 a guessed click is worse than a refused one.
 
+gesture_confirm() provides a lightweight pinch-check: after a confirming gesture
+(pinch, within a freshness window) has been fed through a GestureBus, the binder
+can confirm pending deictic intents without requiring a voice re-utterance.
+
 Pure-Python and headless-importable: this module touches no socket, no Qt and
 no display. It depends only on the frozen Intent contract and DUCK-TYPES the
 stream (`.latest(...)`) and calibration (`.map(...)`) so it imports even while
@@ -16,6 +20,7 @@ the sibling ws_client / calibration modules are still being built in parallel.
 """
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 from ..intent import Intent
@@ -28,6 +33,9 @@ DEFAULT_FRESHNESS_MS = 1200
 # The pointer must be aimed (index extended, middle curled) and confidently
 # tracked before we trust it as a click target. Mirror the ws_client defaults.
 _MIN_CONF = 0.6
+
+# Gesture kind that counts as a confirmation (Iron-Man pinch-to-confirm).
+_CONFIRM_GESTURE = "pinch"
 
 
 class FusionBinder:
@@ -48,6 +56,45 @@ class FusionBinder:
         self._freshness_ms = int(freshness_ms)
 
     # -- public ---------------------------------------------------------------
+
+    def gesture_confirm(self, within_s: float = 1.2) -> bool:
+        """Return True if a 'pinch' gesture was fired within the last `within_s` seconds.
+
+        Checks the GestureBus exposed on the stream (duck-typed: the stream must
+        have a `.gestures` attribute with a `._state.last_fired_ts` and the bus
+        must track the last 'pinch' fire time).  Falls back to False on any
+        error (missing attr, absent bus) so callers degrade gracefully.
+
+        This is used for pinch-to-confirm: after the overlay shows a 'confirm?'
+        prompt the user pinches and this method gates the dispatch.
+
+        Args:
+            within_s: how recently (in monotonic seconds) a pinch must have
+                      fired to count as a confirmation. Default 1.2s.
+        """
+        try:
+            bus = getattr(self._stream, "gestures", None)
+            if bus is None:
+                return False
+            # GestureBus stores last-fire time per-bus (not per-kind in v1).
+            # The last fired gesture is the most recent one; we check both that
+            # it was a pinch AND that it is fresh.
+            state = getattr(bus, "_state", None)
+            if state is None:
+                return False
+            last_fired = getattr(state, "last_fired_ts", 0.0)
+            if last_fired == 0.0:
+                return False
+            # Only a 'pinch' counts as a confirmation gesture.
+            last_kind = getattr(state, "last_fired_kind", None)
+            if last_kind != _CONFIRM_GESTURE:
+                return False
+            # Compare against the bus's own clock so the injectable clock in tests
+            # works correctly.
+            now = bus._clock()
+            return (now - last_fired) <= within_s
+        except Exception:
+            return False
 
     def bind(self, intent: Intent, word_ts: Optional[float] = None) -> Intent:
         """Return `intent` with its deixis point(s) bound, or unchanged.

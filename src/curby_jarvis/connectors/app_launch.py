@@ -197,6 +197,25 @@ class AppLaunchConnector(Connector):
         try:
             if intent.verb in ("open", "run"):
                 ok, detail = self._launch_app(intent)
+                lat = (time.time() - t0) * 1000.0
+                if ok:
+                    # Undo = best-effort hide the launched app. We capture the
+                    # bundle path so the closure is self-contained; never raises.
+                    _path = detail
+                    _self = self
+
+                    def _undo_launch(path=_path, s=_self) -> bool:
+                        try:
+                            return s._hide_app(path)
+                        except Exception:
+                            return False
+
+                    return ConnectorResult(
+                        ok=True, mechanism=self.name, latency_ms=lat,
+                        detail=detail, undo_fn=_undo_launch,
+                    )
+                return ConnectorResult(ok=False, mechanism=self.name, latency_ms=lat,
+                                       error=detail or "launch_failed")
             elif intent.verb == "search":
                 ok, detail = self._open_url(self._search_url(intent))
             elif intent.verb == "mail":
@@ -207,6 +226,7 @@ class AppLaunchConnector(Connector):
             return ConnectorResult(ok=False, mechanism=self.name, error="exception", detail=repr(e))
         lat = (time.time() - t0) * 1000.0
         if ok:
+            # search and mail are irreversible (browser/mail client opened a URL)
             return ConnectorResult(ok=True, mechanism=self.name, latency_ms=lat, detail=detail)
         return ConnectorResult(ok=False, mechanism=self.name, latency_ms=lat,
                                error=detail or "launch_failed")
@@ -253,6 +273,32 @@ class AppLaunchConnector(Connector):
 
         ok = _with_timeout(_do, 4.0, default=False)
         return bool(ok), url
+
+    def _hide_app(self, bundle_path: str) -> bool:
+        """Best-effort hide (not quit) the app at bundle_path via NSWorkspace.
+        Returns True if the app was found running and hidden; False otherwise.
+        Lazy AppKit — never raises out of this method.
+        """
+        if not bundle_path:
+            return False
+
+        def _do() -> bool:
+            try:
+                from AppKit import NSWorkspace
+                ws = NSWorkspace.sharedWorkspace()
+                # Find the running app matching the bundle path.
+                for app in ws.runningApplications():
+                    bundle_url = app.bundleURL()
+                    if bundle_url is None:
+                        continue
+                    if bundle_url.path() == bundle_path:
+                        # hide() returns True on success; best-effort.
+                        return bool(app.hide())
+                return False
+            except Exception:
+                return False
+
+        return bool(_with_timeout(_do, 2.0, default=False))
 
 
 __all__ = ["AppLaunchConnector"]

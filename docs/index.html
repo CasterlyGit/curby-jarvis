@@ -402,7 +402,10 @@
         A voice + hand-gesture universal computer controller for macOS. Aim at
         anything on screen, speak a command, and a hybrid CapabilityRouter picks
         the cheapest mechanism that can actually do it — from a zero-permission
-        app launch all the way down to an open-ended agent.
+        app launch through a structured <span class="mono">AgentLoopConnector</span>
+        that exposes every connector as a Claude tool and composes multi-step plans,
+        meaning the system can do <em>anything</em> via voice and gesture, not just
+        a closed verb set.
       </p>
       <div class="cta-row">
         <a class="cta" href="https://github.com/CasterlyGit/curby-jarvis">View on GitHub →</a>
@@ -411,8 +414,8 @@
       <div class="badges">
         <img src="https://img.shields.io/badge/python-3.11%2B-00e5ff?style=flat-square&labelColor=0a0b0d" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/license-MIT-00e5ff?style=flat-square&labelColor=0a0b0d" alt="MIT License" />
-        <img src="https://img.shields.io/badge/tests-248%20passed-58e07a?style=flat-square&labelColor=0a0b0d" alt="248 tests passed" />
-        <img src="https://img.shields.io/badge/version-v0.1-00e5ff?style=flat-square&labelColor=0a0b0d" alt="Version 0.1" />
+        <img src="https://img.shields.io/badge/tests-742%20passed-58e07a?style=flat-square&labelColor=0a0b0d" alt="742 tests passed" />
+        <img src="https://img.shields.io/badge/version-v2.0.0-00e5ff?style=flat-square&labelColor=0a0b0d" alt="Version 2.0.0" />
         <img src="https://img.shields.io/badge/platform-macOS-7d8794?style=flat-square&labelColor=0a0b0d" alt="macOS" />
       </div>
     </div>
@@ -500,11 +503,12 @@
         </div>
 
         <div class="card">
-          <div class="gd">GD8 · fallback</div>
-          <div class="utterance">long open-ended utterance</div>
+          <div class="gd">GD8 · agent loop</div>
+          <div class="utterance">"draft an email and send it"</div>
           <div class="meta">
-            <span class="tag connector">agent_fallback</span>
+            <span class="tag connector">agent_loop</span>
             <span class="tag">ambiguous</span>
+            <span class="tag confirm">per-step confirm</span>
           </div>
         </div>
 
@@ -556,15 +560,33 @@
         </div>
 
         <div class="rung">
+          <div class="cost"><b>7</b></div>
+          <div class="cname">mcp</div>
+          <div class="cdesc">Any server in <span class="mono">~/.curby/mcp_servers.json</span> becomes a router tool dynamically. Opt-in; zero servers configured by default.</div>
+        </div>
+
+        <div class="rung">
           <div class="cost"><b>8</b></div>
           <div class="cname">intent (LLM)</div>
           <div class="cdesc">LLM intent-parse seam.</div>
         </div>
 
+        <div class="rung">
+          <div class="cost"><b>9</b></div>
+          <div class="cname">agent_loop</div>
+          <div class="cdesc">Structured Claude tool-use loop — exposes every connector as a tool, composes multi-step plans, dispatches each call back through the router. Per-step confirm for irreversible actions.</div>
+        </div>
+
         <div class="rung tail">
           <div class="cost"><b>10</b></div>
           <div class="cname">agent_fallback</div>
-          <div class="cdesc">Open-ended last resort — shells to <span class="mono">claude -p</span>. Always available.</div>
+          <div class="cdesc">Unstructured last resort — shells to <span class="mono">claude -p</span>. Always available.</div>
+        </div>
+
+        <div class="rung tail">
+          <div class="cost"><b>11</b></div>
+          <div class="cname">computer_use</div>
+          <div class="cdesc">Pixel-level vision fallback for AX-opaque UIs. Requires Screen Recording permission.</div>
         </div>
 
       </div>
@@ -607,6 +629,112 @@
     </div>
   </section>
 
+  <!-- ===================== JARVIS HUD ===================== -->
+  <section id="hud">
+    <div class="wrap">
+      <p class="eyebrow">feedback layer</p>
+      <h2 class="section-title"><span class="hash">#</span>JARVIS HUD</h2>
+      <p class="section-lead">
+        A single <span class="mono">SessionPhase</span> state machine
+        (<span class="mono">idle → listening → heard → understanding → planning → acting → done/error</span>)
+        drives every surface in unison — nothing updates independently.
+      </p>
+      <div class="cols">
+        <div class="panel">
+          <h3>VISUAL</h3>
+          <ul>
+            <li><strong>Animated reticle ORB</strong> — audio-reactive ring during speech, thinking-spin while the router plans, lock-on brackets when the action is confirmed.</li>
+            <li><strong>Live partial-transcript caption</strong> — streams the in-progress recognition text under the crosshair as you speak.</li>
+            <li><strong>Ambient screen-edge glow</strong> — subtle colored pulse tied to the current phase; changes hue at each state transition.</li>
+            <li><strong>Radial connector-chain diagnostic ring</strong> — shows which cost rungs were tried and which one won.</li>
+            <li><strong>Command / undo history overlay</strong> — scrollable record of recent actions with undo handles.</li>
+            <li><strong>Adaptive-ink legibility</strong> — HUD ink auto-adjusts contrast for readability over any background content.</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h3>CONSOLE + AUDIO</h3>
+          <ul>
+            <li><strong>Frosted Console card</strong> — progressive disclosure: chosen mechanism → latency chip ("did it in N ms") → undo toast.</li>
+            <li><strong>Latency chip</strong> — per-action wall-clock time shown inline in the console card after every execution.</li>
+            <li><strong>Undo toast</strong> — one-tap undo surfaced immediately after any reversible action.</li>
+            <li><strong>Sub-100 ms ack chime</strong> — on-device sound plays the moment the router starts; confirms the system heard you before the action fires.</li>
+            <li><strong>Sentence-stream TTS</strong> — first sentence plays before the full agent response is ready; no long silence waiting for generation.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== LATENCY ===================== -->
+  <section id="latency">
+    <div class="wrap">
+      <p class="eyebrow">performance model</p>
+      <h2 class="section-title"><span class="hash">#</span>Latency</h2>
+      <p class="section-lead">
+        Streaming STT partials feed a speculative rule-parse off the Speech queue
+        so the router starts before the utterance ends. Short deterministic commands
+        fire near-immediately via cheap rungs.
+      </p>
+      <div class="cols">
+        <div class="panel">
+          <h3>FAST PATH</h3>
+          <ul>
+            <li>Streaming STT partials kick off a speculative rule-parse before the phrase ends — the router has a candidate before you finish speaking.</li>
+            <li>Media, launch, and tab commands fire via rungs 1–6: no LLM in the loop, sub-second round-trip.</li>
+            <li>Sub-100 ms ack chime fires the moment the command is received, before execution completes.</li>
+            <li>Sentence-stream TTS plays the first sentence of any agent response immediately — no full-generation wait.</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h3>BARGE-IN &amp; BUDGETS</h3>
+          <ul>
+            <li><strong>Barge-in</strong> — a new utterance or an open-palm STOP gesture cancels any in-flight action immediately.</li>
+            <li><strong>P95 SLO budgets</strong> — per-stage latency is tracked with rolling P95 targets; regressions surface in telemetry before they reach the user.</li>
+            <li>All timing is written to the per-utterance JSONL trace for offline analysis.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== IRON-MAN GESTURES ===================== -->
+  <section id="gestures">
+    <div class="wrap">
+      <p class="eyebrow">gesture event bus</p>
+      <h2 class="section-title"><span class="hash">#</span>Iron-Man gestures</h2>
+      <p class="section-lead">
+        The hand-signal pointer stream feeds a gesture event bus with hysteresis
+        and cooldown — so a brief hand tremor never fires an accidental command.
+      </p>
+      <div class="ladder">
+
+        <div class="rung zero">
+          <div class="cost" style="font-size:20px">✊</div>
+          <div class="cname">pinch</div>
+          <div class="cdesc">Confirm the pending action — equivalent to clicking the overlay confirm button.</div>
+        </div>
+
+        <div class="rung tail">
+          <div class="cost" style="font-size:20px">✋</div>
+          <div class="cname">open palm</div>
+          <div class="cdesc">STOP / barge-in — immediately cancels any in-flight action or agent step.</div>
+        </div>
+
+        <div class="rung">
+          <div class="cost" style="font-size:20px">👋</div>
+          <div class="cname">swipe</div>
+          <div class="cdesc">Directional verb: left/right = prev/next; up/down = scroll. Direction is inferred from swipe vector.</div>
+        </div>
+
+      </div>
+      <p class="ladder-note">
+        <span class="k">hysteresis + cooldown:</span> each gesture requires a
+        sustained hold past a threshold and a quiet period before the next
+        gesture can fire — accidental triggers are suppressed.
+      </p>
+    </div>
+  </section>
+
   <!-- ===================== SAFETY + OBSERVABILITY ===================== -->
   <section id="safety">
     <div class="wrap">
@@ -617,6 +745,9 @@
           <h3>SAFETY</h3>
           <ul>
             <li>Irreversible actions require an overlay confirm before executing.</li>
+            <li><strong>Multi-step task engine</strong> — <span class="mono">agent_loop</span> presents each planned step with a per-step confirm gate; every executed step is logged to the undo ledger.</li>
+            <li><strong>Undo ledger + session memory</strong> — SQLite-backed; the console card surfaces an undo toast after each action.</li>
+            <li><strong>One-time execution-grant token vault</strong> — sensitive agent actions require a one-time grant and cannot be silently replayed.</li>
             <li>Secure-Input detection blocks keystroke injection at password fields.</li>
             <li>Every AX call is watchdog-wrapped — a timeout falls through, never hangs.</li>
             <li>Connectors never raise; errors return in the result so routing degrades gracefully.</li>
@@ -625,10 +756,13 @@
         <div class="panel">
           <h3>OBSERVABILITY</h3>
           <ul>
+            <li><strong>Per-utterance trace_id telemetry</strong> — each utterance gets a unique trace ID; all routing decisions are written to a JSONL log (OTel-GenAI-aligned).</li>
+            <li><strong>Per-connector circuit breakers</strong> — a connector that fails repeatedly trips its breaker; the router skips it and degraded-mode routing continues with the remaining chain.</li>
+            <li><strong><span class="mono">--check</span> preflight</strong> — reports Microphone / Speech / Accessibility / Automation / Screen-Recording / agent / MCP status and opens the correct Settings pane for anything missing.</li>
             <li>Each connector's <span class="mono">.name</span> is its mechanism tag in telemetry.</li>
             <li>The dry-run audit JSON is an inspectable, diffable decision record.</li>
             <li>The golden harness drives all 8 demos through the real CLI.</li>
-            <li>248 passed, 1 skipped — fully headless under <span class="mono">QT_QPA_PLATFORM=offscreen</span>.</li>
+            <li>742 passed, 4 skipped — fully headless under <span class="mono">QT_QPA_PLATFORM=offscreen</span>.</li>
           </ul>
         </div>
       </div>
@@ -641,7 +775,7 @@
       <div class="fline">
         <span>curby-jarvis</span>
         <span class="sep">·</span>
-        <span>v0.1</span>
+        <span>v2.0.0</span>
         <span class="sep">·</span>
         <span>MIT License</span>
         <span class="sep">·</span>

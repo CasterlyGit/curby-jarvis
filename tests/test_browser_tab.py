@@ -134,8 +134,9 @@ def test_tab_by_name_builds_plausible_chromium_script():
     c = _connector(front="Google Chrome", bridge=bridge)
     res = c.execute(Intent("tab_by_name", target="Gmail", args={"name": "Gmail"}))
     assert res.ok is True
-    assert len(bridge.calls) == 1
-    script, timeout = bridge.calls[0]
+    # calls[0] = pre-navigate current-index fetch; calls[-1] = the nav script.
+    assert len(bridge.calls) == 2
+    script, timeout = bridge.calls[-1]
     assert timeout == 1.0
     assert 'tell application "Google Chrome"' in script
     assert "tabs of front window" in script
@@ -148,7 +149,8 @@ def test_tab_by_name_safari_uses_current_tab():
     c = _connector(front="Safari", bridge=bridge)
     res = c.execute(Intent("tab_by_name", target="Docs"))
     assert res.ok is True
-    script, _ = bridge.calls[0]
+    # calls[-1] = the actual navigation script (calls[0] is the index pre-fetch).
+    script, _ = bridge.calls[-1]
     assert 'tell application "Safari"' in script
     assert "set current tab of front window" in script
     assert 'contains "Docs"' in script
@@ -165,7 +167,8 @@ def test_tab_by_name_quotes_are_escaped():
     bridge = FakeBridge(result=(True, "1"))
     c = _connector(front="Brave Browser", bridge=bridge)
     c.execute(Intent("tab_by_name", target='a"b'))
-    script, _ = bridge.calls[0]
+    # The nav script is the last call; the pre-fetch is first.
+    script, _ = bridge.calls[-1]
     # the embedded quote must be backslash-escaped so the AppleScript stays valid
     assert '\\"' in script
 
@@ -199,7 +202,8 @@ def test_goto_tab_chromium_sets_index():
     c = _connector(front="Google Chrome", bridge=bridge)
     res = c.execute(Intent("goto_tab", args={"index": 3}))
     assert res.ok is True
-    script, _ = bridge.calls[0]
+    # calls[-1] = nav script; calls[0] = pre-fetch (current index).
+    script, _ = bridge.calls[-1]
     assert "set active tab index of front window to 3" in script
 
 
@@ -208,7 +212,7 @@ def test_goto_tab_safari_selects_tab():
     c = _connector(front="Safari", bridge=bridge)
     res = c.execute(Intent("goto_tab", args={"index": 2}))
     assert res.ok is True
-    script, _ = bridge.calls[0]
+    script, _ = bridge.calls[-1]
     assert "set current tab of front window to tab 2" in script
 
 
@@ -217,7 +221,7 @@ def test_goto_tab_index_from_numeric_target():
     c = _connector(front="Arc", bridge=bridge)
     res = c.execute(Intent("goto_tab", target="5"))
     assert res.ok is True
-    assert "to 5" in bridge.calls[0][0]
+    assert "to 5" in bridge.calls[-1][0]
 
 
 def test_goto_tab_missing_index_returns_not_ok():

@@ -8,7 +8,7 @@ elsewhere.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Optional
+from typing import Callable, Optional
 
 # ---- vocabulary -------------------------------------------------------------
 
@@ -107,4 +107,24 @@ class ConnectorResult:
     mechanism: str = ""
     latency_ms: float = 0.0
     error: str = ""        # 'secure_input_blocked' | 'ax_timeout' | 'no_press_action' | 'cancelled' | ...
-    detail: str = ""
+    detail: str = ""       # machine detail: workdir, exit code, element role
+    # --- INF-01 additive fields (all optional, default to today's behavior) ---
+    detail_text: str = ""  # human/agent-facing text output (e.g. agent loop's final reply); spoken by TTS
+    undo_fn: Optional[Callable[[], bool]] = None  # if set, reverses this action; powers 'undo that' + undo toast
+    steps: int = 0         # number of sub-steps an agent/task connector ran (0 = atomic)
+
+
+@dataclass
+class ProgressEvent:
+    """A streamed intermediate-state event from a long-running connector.
+
+    Connectors that implement ``execute_streaming`` emit these so the overlay can
+    narrate work-in-flight (the agent loop's tool calls, a task engine's steps)
+    instead of showing dead air. Dependency-free + headless on purpose: the same
+    object crosses the worker→Qt boundary and is logged to telemetry.
+    """
+    phase: str            # one of overlay.phase.PHASES ('planning'|'acting'|...) or a free label
+    text: str = ""        # human-readable line, e.g. "opening Spotify" / "clicked Play"
+    pct: Optional[float] = None   # 0..1 progress within the step, or None when indeterminate
+    mechanism: str = ""   # which connector/tool produced it (for telemetry correlation)
+    kind: str = "status"  # 'status' | 'tool_call' | 'tool_result' | 'token' | 'step' | 'error'

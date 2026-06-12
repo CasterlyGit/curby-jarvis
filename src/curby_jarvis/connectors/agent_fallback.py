@@ -71,6 +71,7 @@ class AgentFallbackConnector(Connector):
 
     name = "agent_fallback"
     cost = 10
+    use_breaker = True  # INF-15: opt into circuit breaker for failover protection
 
     def __init__(self, tasks_root: Optional[str] = None, timeout: float = _DEFAULT_TIMEOUT):
         # Injectable root keeps execute() testable without writing under $HOME.
@@ -80,6 +81,11 @@ class AgentFallbackConnector(Connector):
     # -- contract ------------------------------------------------------------
 
     def can_handle(self, intent: Intent) -> float:
+        # Never catch a sub-intent the agent loop dispatched — otherwise an
+        # unroutable tool verb would spawn a fresh `claude -p` instead of being
+        # reported back to the loop as an unhandled tool.
+        if intent.args.get("_via_agent_loop"):
+            return 0.0
         # Explicit agent task -> full confidence. Anything else -> the catch-all
         # floor so the chain always has a terminating candidate.
         if intent.verb == "agent_task":
@@ -134,12 +140,21 @@ class AgentFallbackConnector(Connector):
             return ConnectorResult(ok=False, mechanism=self.name, error="exception", detail=repr(e))
         lat = (time.time() - t0) * 1000.0
         if code is None:
+            self._record_breaker_failure()
+            self._emit_telemetry(ok=False, reason="timeout", latency_ms=lat)
             return ConnectorResult(ok=False, mechanism=self.name, latency_ms=lat,
-                                   error="agent_timeout", detail=str(workdir))
+                                   error="agent_timeout", detail=str(workdir),
+                                   detail_text="Agent task timed out.")
         if code == 0:
-            return ConnectorResult(ok=True, mechanism=self.name, latency_ms=lat, detail=str(workdir))
+            self._record_breaker_success()
+            self._emit_telemetry(ok=True, reason="exit_0", latency_ms=lat)
+            return ConnectorResult(ok=True, mechanism=self.name, latency_ms=lat, detail=str(workdir),
+                                   detail_text="Agent task completed successfully.")
+        self._record_breaker_failure()
+        self._emit_telemetry(ok=False, reason=f"exit_{code}", latency_ms=lat)
         return ConnectorResult(ok=False, mechanism=self.name, latency_ms=lat,
-                               error="agent_failed", detail=f"exit={code} cwd={workdir}")
+                               error="agent_failed", detail=f"exit={code} cwd={workdir}",
+                               detail_text=f"Agent task failed with exit code {code}.")
 
     def _spawn(self, argv: list[str], workdir: str) -> Optional[int]:
         """Run the agent detached; return its exit code, or None on timeout.
@@ -161,6 +176,42 @@ class AgentFallbackConnector(Connector):
             # Leave the detached agent running — it's mid-task and owns its own
             # session; killing it could corrupt half-applied edits. Report timeout.
             return None
+
+
+    # -- INF-15: breaker + telemetry helpers ------------------------------------
+
+    def _record_breaker_success(self) -> None:
+        """Best-effort breaker record; never raises."""
+        try:
+            b = self.breaker
+            if b is not None:
+                b.record_success()
+        except Exception:
+            pass
+
+    def _record_breaker_failure(self) -> None:
+        """Best-effort breaker record; never raises."""
+        try:
+            b = self.breaker
+            if b is not None:
+                b.record_failure()
+        except Exception:
+            pass
+
+    def _emit_telemetry(self, *, ok: bool, reason: str, latency_ms: float) -> None:
+        """Best-effort operational telemetry; never raises. Lazy import so this
+        module stays headless even before telemetry.py is built (module D)."""
+        try:
+            from ..telemetry import emit  # lazy — module may not exist yet
+            emit(
+                surface="operational",
+                mechanism=self.name,
+                ok=ok,
+                reason=reason,
+                latency_ms=latency_ms,
+            )
+        except Exception:
+            pass
 
 
 __all__ = ["AgentFallbackConnector"]

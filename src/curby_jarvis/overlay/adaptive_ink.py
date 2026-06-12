@@ -1,36 +1,46 @@
-"""PHASE-2 STUB — adaptive ink for the Frosted Console card.
+"""Adaptive ink — background-aware panel style for the Frosted Console card (UI-12).
 
-Locked v0.1 aesthetic makes the card text background-independent on purpose: the
-deep frosted panel (#1a1d27 @ alpha 244) means card glyphs never depend on the
-pixels behind it, so v0.1 never samples the screen for the card. The ONLY marks
-that touch raw pixels are the reticle + target bracket, and those already solve
-contrast with the action_highlight white-over-black-keyline trick (see
-overlay/reticle.py).
+WHY: The Frosted Console card uses a locked deep-frost panel (#1a1d27 @ alpha 244)
+that guarantees text contrast on typical dark desktops. When the desktop behind
+the card is bright or busy, the text still reads cleanly, but the card becomes more
+visually intrusive (harsh contrast band). This module graduates the card to
+background-aware ink: sample the region under the card at 2fps (off the paint
+thread), compute perceptual luminance, and nudge the panel alpha and glow width
+so the card stays legible while blending better over any desktop.
 
-This module is where a LATER phase graduates the card itself to background-aware
-ink: sample the region under the card, compute its luminance, and nudge the
-panel alpha / accent so the card stays legible if we ever drop the frosted floor
-to show more of the desktop through it. For now only `mean_luminance` is a real,
-pure, unit-tested function; `AdaptiveInk` is a skeleton that returns the locked
-defaults unchanged.
+The 2fps sample is owned by PreviewCardWidget (via a QTimer) and passed here as
+a PIL image. This module is PURE — no Qt, no QTimer, no screen capture at import
+time; it only computes style from an already-grabbed image.
 
-HEADLESS: top-level imports are pure-Python; Pillow + numpy (both core deps) are
-used lazily inside `mean_luminance`. No Qt, no screen capture, no pyobjc at import
-time. The actual screen grab (lazy `mss`) lands when this graduates.
+Adaptation rules (luminance 0=black .. 1=white):
+  dark  (lum < DARK_BG):   alpha slightly reduced (more transparency) + wider glow
+                            since dark desktop enhances frosted effect.
+  mid   (DARK_BG..LIGHT_BG): locked defaults (no change needed).
+  light (lum > LIGHT_BG):  alpha pushed up (more opaque) to keep text legible;
+                            glow reduced to avoid floating feeling on bright bg.
+
+HEADLESS: top-level imports are pure-Python. Pillow + numpy are lazy (localized
+inside mean_luminance). No Qt, no screen capture, no pyobjc at import time.
 """
 from __future__ import annotations
 
 from typing import Optional, Tuple
 
-# Locked Frosted Console panel defaults (mirror preview_card.py). The phase-2
-# adapter starts from these and only perturbs them when the sampled background
-# would otherwise hurt legibility.
+# Locked Frosted Console panel defaults (mirror preview_card.py).
 _PANEL_RGB = (0x1A, 0x1D, 0x27)
 _PANEL_ALPHA = 244
-# Below this luminance the desktop behind the card is "dark"; above it "light".
-# Used only by the phase-2 path; kept here so the threshold is documented now.
+# Luminance thresholds: below DARK_BG the background is "dark"; above LIGHT_BG "light".
 _DARK_BG = 0.35
 _LIGHT_BG = 0.65
+
+# Alpha range for adaptation (never go below MIN_ALPHA so text stays legible)
+_MIN_ALPHA = 210
+_MAX_ALPHA = 252
+
+# Glow blur radius range (pixels)
+_GLOW_DARK = 42    # wider glow on dark backgrounds enhances depth
+_GLOW_MID = 34     # locked default
+_GLOW_LIGHT = 24   # narrower on bright to reduce visual weight
 
 
 def mean_luminance(pil_image) -> float:
@@ -44,14 +54,10 @@ def mean_luminance(pil_image) -> float:
     Accepts any PIL Image (RGB, RGBA, L, ...). Empty images return 0.0 rather
     than dividing by zero, so a degenerate grab can't crash the overlay.
     """
-    # Lazy: keep Pillow off the module's top-level import surface is unnecessary
-    # (Pillow is pure-Python-importable headless), but we still localize the use.
     gray = pil_image.convert("L")  # PIL applies the 601-2 luma weights
     w, h = gray.size
     if w == 0 or h == 0:
         return 0.0
-    # numpy is a core dep; np.asarray on the 'L' image is the fast, future-proof
-    # path (Image.getdata() is deprecated in Pillow 14). mean of 8-bit -> /255.
     import numpy as np
 
     arr = np.asarray(gray, dtype=np.float64)
@@ -61,18 +67,16 @@ def mean_luminance(pil_image) -> float:
 
 
 class AdaptiveInk:
-    """PHASE-2 skeleton: graduate the card to background-sampling ink.
+    """Background-aware panel style for the Frosted Console card.
 
-    Today this is inert — `panel_style()` returns the locked Frosted Console
-    defaults regardless of what's behind the card, because v0.1's opaque frost
-    already guarantees contrast. When this graduates it will:
-      1. lazily grab the screen region under the card (mss, optional dep),
-      2. call `mean_luminance` on that region,
-      3. push panel alpha up over busy/bright backgrounds and pick a light/dark
-         accent variant so card text never fights the desktop showing through.
+    panel_style(background) takes an optional PIL image of the region under the
+    card (already grabbed at 2fps by PreviewCardWidget's QTimer) and returns an
+    adapted (panel_rgb, panel_alpha) tuple. When background is None or computation
+    fails, the locked Frosted Console defaults are returned so the card is always
+    safe to render.
 
-    Wiring it in is a one-line swap in PreviewCardWidget; until then the card
-    paints the static palette and this class is a documented seam, not a TODO.
+    The glow_blur() method returns the recommended QGraphicsDropShadowEffect blur
+    radius for the same background — darker bg gets a wider glow.
     """
 
     def __init__(self, dark_bg: float = _DARK_BG, light_bg: float = _LIGHT_BG) -> None:
@@ -80,7 +84,7 @@ class AdaptiveInk:
         self.light_bg = light_bg
 
     def classify(self, luminance: float) -> str:
-        """Bucket a 0..1 luminance into 'dark' | 'mid' | 'light' (phase-2 seam)."""
+        """Bucket a 0..1 luminance into 'dark' | 'mid' | 'light'."""
         if luminance <= self.dark_bg:
             return "dark"
         if luminance >= self.light_bg:
@@ -90,13 +94,63 @@ class AdaptiveInk:
     def panel_style(
         self, background: Optional[object] = None
     ) -> Tuple[Tuple[int, int, int], int]:
-        """Return (panel_rgb, panel_alpha) for the card.
+        """Return (panel_rgb, panel_alpha) adapted to the background.
 
-        PHASE-2 STUB: ignores `background` and returns the locked frosted panel.
-        The future implementation samples `background` (a PIL grab under the
-        card) and adapts. Returning the constant keeps v0.1 deterministic.
+        background: a PIL Image of the screen region under the card (grabbed at
+        2fps by PreviewCardWidget). None or any failure → locked defaults.
+
+        Adaptation:
+          dark bg  → slightly reduced alpha (205-220) to use frosted effect more
+          mid bg   → locked defaults
+          light bg → raised alpha (248-252) to maintain legibility
         """
-        return _PANEL_RGB, _PANEL_ALPHA
+        if background is None:
+            return _PANEL_RGB, _PANEL_ALPHA
+
+        try:
+            lum = mean_luminance(background)
+            bucket = self.classify(lum)
+
+            if bucket == "dark":
+                # Reduce alpha slightly: deeper frost shows more on dark bg
+                # Scale: lum=0 → alpha=_MIN_ALPHA, lum=DARK_BG → alpha=_PANEL_ALPHA
+                t = lum / self.dark_bg if self.dark_bg > 0 else 0.0
+                alpha = int(round(_MIN_ALPHA + (_PANEL_ALPHA - _MIN_ALPHA) * t))
+                return _PANEL_RGB, max(_MIN_ALPHA, min(_PANEL_ALPHA, alpha))
+
+            if bucket == "light":
+                # Raise alpha: brighter bg → more opaque panel to protect text
+                # Scale: lum=LIGHT_BG → alpha=_PANEL_ALPHA, lum=1 → alpha=_MAX_ALPHA
+                t = (lum - self.light_bg) / (1.0 - self.light_bg) if (1.0 - self.light_bg) > 0 else 1.0
+                alpha = int(round(_PANEL_ALPHA + (_MAX_ALPHA - _PANEL_ALPHA) * t))
+                return _PANEL_RGB, max(_PANEL_ALPHA, min(_MAX_ALPHA, alpha))
+
+            # mid: locked defaults
+            return _PANEL_RGB, _PANEL_ALPHA
+
+        except Exception:
+            return _PANEL_RGB, _PANEL_ALPHA
+
+    def glow_blur(self, background: Optional[object] = None) -> int:
+        """Return the recommended glow blur radius (px) for this background.
+
+        dark bg → wider glow; mid → default 34; light → narrower glow.
+        """
+        if background is None:
+            return _GLOW_MID
+
+        try:
+            lum = mean_luminance(background)
+            bucket = self.classify(lum)
+            if bucket == "dark":
+                t = lum / self.dark_bg if self.dark_bg > 0 else 0.0
+                return int(round(_GLOW_DARK + (_GLOW_MID - _GLOW_DARK) * t))
+            if bucket == "light":
+                t = (lum - self.light_bg) / (1.0 - self.light_bg) if (1.0 - self.light_bg) > 0 else 1.0
+                return int(round(_GLOW_MID + (_GLOW_LIGHT - _GLOW_MID) * t))
+            return _GLOW_MID
+        except Exception:
+            return _GLOW_MID
 
 
 __all__ = ["mean_luminance", "AdaptiveInk"]

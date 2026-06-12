@@ -7,4 +7,4 @@ core imports headless under CI.
 from .intent import Intent, PreviewCard, ConnectorResult  # noqa: F401
 from .router import CapabilityRouter  # noqa: F401
 
-__version__ = "0.1.0"
+__version__ = "2.0.0"

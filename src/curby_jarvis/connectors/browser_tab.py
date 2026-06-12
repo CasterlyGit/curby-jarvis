@@ -105,6 +105,29 @@ def _safari_goto_index_script(index_1based: int) -> str:
     )
 
 
+def _chromium_get_current_index_script(app_name: str) -> str:
+    """AppleScript: return the current active tab index (1-based) for a Chromium browser."""
+    return (
+        f'tell application "{app_name}"\n'
+        f"  return active tab index of front window\n"
+        f"end tell"
+    )
+
+
+def _safari_get_current_index_script() -> str:
+    """AppleScript: return the current tab index (1-based) for Safari front window."""
+    return (
+        'tell application "Safari"\n'
+        "  set theTabs to tabs of front window\n"
+        "  set curTab to current tab of front window\n"
+        "  repeat with i from 1 to count of theTabs\n"
+        "    if item i of theTabs is curTab then return i\n"
+        "  end repeat\n"
+        "  return 1\n"
+        "end tell"
+    )
+
+
 class BrowserTabConnector(Connector):
     name = "browser_tab"
     cost = 6
@@ -200,13 +223,41 @@ class BrowserTabConnector(Connector):
         combo = _KEY_NEXT if d == "next" else _KEY_PREV
         from .. import cgevent  # lazy: built by the deixis-click task
         ok = bool(cgevent.key(combo))
+        undo = None
+        if ok:
+            # Undo = switch back in the opposite direction. Never raises.
+            reverse_combo = _KEY_PREV if d == "next" else _KEY_NEXT
+
+            def _undo_switch(rc=reverse_combo) -> bool:
+                try:
+                    from .. import cgevent as _cg
+                    return bool(_cg.key(rc))
+                except Exception:
+                    return False
+
+            undo = _undo_switch
         return ConnectorResult(
             ok=ok,
             mechanism=self.name,
             error="" if ok else "cgevent_blocked",
             detail=combo,
             latency_ms=(time.time() - t0) * 1000.0,
+            undo_fn=undo,
         )
+
+    def _get_current_tab_index(self, kind: str, app_name: str) -> Optional[int]:
+        """Capture the current active tab index before we navigate, for undo.
+        Returns None if we can't determine it (best-effort only)."""
+        try:
+            bridge = self._get_bridge()
+            script = (_safari_get_current_index_script() if kind == "safari"
+                      else _chromium_get_current_index_script(app_name))
+            ok, out = bridge.run(script, timeout=0.5)
+            if ok and out.strip().isdigit():
+                return int(out.strip())
+        except Exception:
+            pass
+        return None
 
     def _exec_select(self, intent: Intent, t0: float) -> ConnectorResult:
         name, kind, app_name = self._resolve_target(intent)
@@ -217,6 +268,9 @@ class BrowserTabConnector(Connector):
                 ok=False, mechanism=self.name, error="not_a_browser",
                 detail=app_name, latency_ms=(time.time() - t0) * 1000.0,
             )
+
+        # Capture current tab index before we move — needed for undo.
+        prev_index = self._get_current_tab_index(kind, app_name)
 
         if intent.verb == "goto_tab":
             idx = self._goto_index(intent)
@@ -251,8 +305,30 @@ class BrowserTabConnector(Connector):
                 ok=False, mechanism=self.name, error="tab_not_found",
                 detail=name, latency_ms=latency,
             )
+
+        # Build undo_fn: switch back to the original tab index.
+        # If we couldn't capture the previous index, undo_fn is None.
+        undo = None
+        if prev_index is not None:
+            _kind = kind
+            _app = app_name
+            _idx = prev_index
+            _bridge_ref = self  # hold a reference to self for lazy bridge access
+
+            def _undo_select(k=_kind, a=_app, i=_idx, c=_bridge_ref) -> bool:
+                try:
+                    restore_script = (_safari_goto_index_script(i) if k == "safari"
+                                      else _chromium_goto_index_script(a, i))
+                    ok2, _ = c._get_bridge().run(restore_script, timeout=1.0)
+                    return bool(ok2)
+                except Exception:
+                    return False
+
+            undo = _undo_select
+
         return ConnectorResult(
             ok=True, mechanism=self.name, detail=out, latency_ms=latency,
+            undo_fn=undo,
         )
 
     # -- helpers --------------------------------------------------------------
