@@ -333,6 +333,43 @@ class TestBackendSelection:
 
 
 # ---------------------------------------------------------------------------
+# 4b. cli_path() / cli_available() — bare-PATH daemon resolution
+# ---------------------------------------------------------------------------
+
+class TestBinaryResolution:
+    """Daemons (launchd, conductord) run with PATH=/usr/bin:/bin:/usr/sbin:/sbin —
+    resolution must fall back to well-known install locations, not just which()."""
+
+    def test_env_override_wins(self, monkeypatch):
+        from curby_jarvis.claude_cli import cli_path
+
+        monkeypatch.setenv("CLAUDE_CLI", "/custom/claude")
+        assert cli_path() == "/custom/claude"
+
+    def test_falls_back_to_known_location_when_path_bare(self, monkeypatch, tmp_path):
+        import curby_jarvis.claude_cli as mod
+
+        fake = tmp_path / "claude"
+        fake.write_text("#!/bin/sh\n")
+        fake.chmod(0o755)
+        monkeypatch.delenv("CLAUDE_CLI", raising=False)
+        monkeypatch.setattr(mod.shutil, "which", lambda _: None)  # bare PATH
+        monkeypatch.setattr(mod, "_FALLBACK_LOCATIONS", (str(fake),))
+        assert mod.cli_path() == str(fake)
+        assert mod.cli_available() is True
+
+    def test_no_binary_anywhere_degrades(self, monkeypatch, tmp_path):
+        import curby_jarvis.claude_cli as mod
+
+        monkeypatch.delenv("CLAUDE_CLI", raising=False)
+        monkeypatch.setattr(mod.shutil, "which", lambda _: None)
+        monkeypatch.setattr(mod, "_FALLBACK_LOCATIONS",
+                            (str(tmp_path / "nope" / "claude"),))
+        assert mod.cli_path() == "claude"        # last-resort literal
+        assert mod.cli_available() is False      # but availability is honest
+
+
+# ---------------------------------------------------------------------------
 # 5. ClaudeCliIntentClient — maps messages.create() → CliMessage + ToolUseBlock
 # ---------------------------------------------------------------------------
 

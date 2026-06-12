@@ -65,18 +65,40 @@ class ClaudeCliError(Exception):
     """
 
 
-def cli_path() -> str:
-    """Resolve the claude binary. CLAUDE_CLI env var overrides; else PATH lookup."""
+# Well-known install locations, tried when PATH lookup fails. Daemons (launchd,
+# conductord) often run with a bare system PATH (/usr/bin:/bin:/usr/sbin:/sbin)
+# that misses the npm/homebrew bin dirs — resolution must survive that.
+_FALLBACK_LOCATIONS = (
+    "/usr/local/bin/claude",
+    "/opt/homebrew/bin/claude",
+    "~/.local/bin/claude",
+)
+
+
+def _resolve() -> Optional[str]:
+    """CLAUDE_CLI override → PATH lookup → well-known locations → None."""
     override = os.environ.get("CLAUDE_CLI")
     if override:
         return override
     found = shutil.which("claude")
-    return found or "claude"
+    if found:
+        return found
+    for loc in _FALLBACK_LOCATIONS:
+        p = os.path.expanduser(loc)
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def cli_path() -> str:
+    """Resolve the claude binary. CLAUDE_CLI env var overrides; else PATH lookup;
+    else well-known install locations (bare-PATH daemon environments)."""
+    return _resolve() or "claude"
 
 
 def cli_available() -> bool:
-    """True if the claude binary is on PATH (or CLAUDE_CLI is set to a valid path)."""
-    path = os.environ.get("CLAUDE_CLI") or shutil.which("claude")
+    """True if the claude binary is resolvable to a real executable."""
+    path = _resolve()
     if not path:
         return False
     return os.path.isfile(path) and os.access(path, os.X_OK)
