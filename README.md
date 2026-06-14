@@ -1,3 +1,8 @@
+> ## 🗄️ ARCHIVED — superseded by caster / jarvis
+>
+> Voice + gesture control now lives in [`jarvis`](https://github.com/CasterlyGit/jarvis) (`spine/voice`, `hands/`). Right-Option = the caster entrance. Do not relaunch.
+> ⚠️ Unmerged v2.0 work lives on branch `revamp/jarvis-v2` (742 tests) — recover from there if porting.
+
 # curby-jarvis
 
 **Voice + hand-gesture universal computer controller for macOS — point and say.**
